@@ -1,0 +1,112 @@
+<mujoco model="el_a3_gripper scene">
+  <compiler angle="radian"/>
+
+  <statistic center="0 0 0.15" extent="0.6"/>
+
+  <option timestep="0.001" iterations="50" solver="Newton" cone="elliptic">
+    <flag gravity="enable" energy="enable"/>
+  </option>
+
+  <visual>
+    <headlight diffuse="0.6 0.6 0.6" ambient="0.3 0.3 0.3" specular="0 0 0"/>
+    <rgba haze="0.15 0.25 0.35 1"/>
+    <global azimuth="140" elevation="-30"/>
+  </visual>
+
+  <asset>
+    <texture type="skybox" builtin="gradient" rgb1="0.3 0.5 0.7" rgb2="0 0 0" width="512" height="3072"/>
+    <texture type="2d" name="groundplane" builtin="checker" mark="edge" rgb1="0.2 0.3 0.4" rgb2="0.1 0.2 0.3"
+      markrgb="0.8 0.8 0.8" width="300" height="300"/>
+    <material name="groundplane" texture="groundplane" texuniform="true" texrepeat="5 5" reflectance="0.2"/>
+    <mesh name="l1" content_type="model/stl" file="../meshes/l1.stl"/>
+    <mesh name="l2" content_type="model/stl" file="../meshes/l2.stl"/>
+    <mesh name="l3" content_type="model/stl" file="../meshes/l3.stl"/>
+    <mesh name="l4" content_type="model/stl" file="../meshes/l4.stl"/>
+    <mesh name="l5" content_type="model/stl" file="../meshes/l5.stl"/>
+    <mesh name="l6" content_type="model/stl" file="../meshes/l6.stl"/>
+    <mesh name="el05_l6" content_type="model/stl" file="../meshes/el05_l6.stl"/>
+    <mesh name="jaw" content_type="model/stl" file="../meshes/jaw.stl"/>
+  </asset>
+
+  <worldbody>
+    <light pos="0 0 1.5" dir="0 0 -1" directional="true"/>
+    <geom name="floor" size="0 0 0.05" type="plane" material="groundplane" contype="4" conaffinity="4"/>
+
+    <body name="target" pos="0.0 -0.3 0.2" mocap="true">
+      <geom type="sphere" size="0.004" contype="0" conaffinity="0" rgba="1 0 0 0.8"/>
+    </body>
+
+    <geom name="l1_visual" pos="-0.000643355 0 0.059" quat="1 0 0 0" type="mesh" contype="0" conaffinity="0"
+      rgba="0.301961 0.290196 0.262745 1" mesh="l1"/>
+    <body name="l1_link_urdf_asm" pos="0 0 0.06" quat="1.32679e-06 1 0 0">
+      <inertial pos="-0.00232762 -0.00161986 0.0421389" quat="0.837633 0.535962 -0.0926092 0.0503874" mass="0.105244" diaginertia="0.000165368 0.000121606 9.30122e-05"/>
+      <joint name="L1_joint" pos="0 0 0" axis="0 0 -1" range="-2.79253 2.79253" actuatorfrcrange="-14 14" damping="0.1" frictionloss="0.1"/>
+      <geom name="l2_visual" pos="-0.000642857 0 0.001" quat="1.32679e-06 1 0 0" type="mesh" contype="0" conaffinity="0"
+        rgba="0.972549 0.529412 0.00392157 1" mesh="l2"/>
+      <body name="l2_l3_urdf_asm" pos="-0.00964286 0 -0.069" quat="0.707105 -0.707108 0 0">
+        <inertial pos="0.0949957 1.32911e-06 0.000626283" quat="0.499818 0.50015 0.49985 0.500182" mass="0.836196" diaginertia="0.00708317 0.00707892 0.000419405"/>
+        <joint name="L2_joint" pos="0 0 0" axis="0 0 1" range="0 3.66519" actuatorfrcrange="-14 14" damping="0.1" frictionloss="0.1"/>
+        <geom name="l3_visual" pos="0.009 -0.07 0" quat="0.707105 -0.707108 0 0" type="mesh" contype="0" conaffinity="0"
+          rgba="0.301961 0.290196 0.262745 1" mesh="l3"/>
+        <body name="l3_lnik_urdf_asm" pos="0.19 0 0">
+          <inertial pos="-0.0743466 -0.0535452 -0.00326782" quat="0.233153 0.612994 0.347208 0.670317" mass="0.262025" diaginertia="0.00134684 0.00131972 0.000299972"/>
+          <joint name="L3_joint" pos="0 0 0" axis="0 0 1" range="-4.01426 0" actuatorfrcrange="-14 14" damping="0.1" frictionloss="0.1"/>
+          <geom name="l4_visual" pos="-0.181 -0.07 0" quat="0.707105 -0.707108 0 0" type="mesh" contype="0" conaffinity="0"
+            rgba="0.972549 0.529412 0.00392157 1" mesh="l4"/>
+          <body name="l4_l5_urdf_asm" pos="-0.185 0.064 0" quat="1.32679e-06 -1 0 0">
+            <inertial pos="-0.0242818 -0.0298393 0.000368105" quat="0.663117 0.6705 -0.235274 -0.235269" mass="0.55715" diaginertia="0.00100222 0.000993544 0.000180152"/>
+            <joint name="L4_joint" pos="0 0 0" axis="0 0 -1" range="-1.0472 1.5708" actuatorfrcrange="-6 6" damping="0.05" frictionloss="0.05"/>
+            <geom name="l5_visual" pos="0.004 0.134 0" quat="0.707105 0.707108 0 0" type="mesh" contype="0" conaffinity="0"
+              rgba="0.301961 0.290196 0.262745 1" mesh="l5"/>
+            <body name="part_9" pos="-0.0492 -0.038 0" quat="0.707105 -0.707108 0 0">
+              <inertial pos="0.00527533 0 -0.0216678" quat="0.980841 0 -0.194812 0" mass="0.0392349" diaginertia="1.62459e-05 1.4787e-05 4.67101e-06"/>
+              <joint name="L5_joint" pos="0 0 0" axis="0 0 1" range="-1.5708 1.5708" actuatorfrcrange="-6 6" damping="0.05" frictionloss="0.05"/>
+              <geom name="l6_visual" pos="0.0532 0 0.173" quat="1.32679e-06 1 0 0" type="mesh" contype="0" conaffinity="0"
+                rgba="0.972549 0.529412 0.00392157 1" mesh="l6"/>
+              <body name="l5_l6_urdf_asm" pos="0.00685 0 0.039" quat="0.499998 -0.5 0.500002 -0.5">
+                <inertial pos="7.89154e-06 -9.46048e-05 0.0599853" quat="0.718801 -0.00441624 0.0042182 0.695189" mass="0.678292" diaginertia="0.00387593 0.00345206 0.000635307"/>
+                <joint name="L6_joint" pos="0 0 0" axis="0 0 1" range="-0.79 0.79" actuatorfrcrange="-6 6" damping="0.05" frictionloss="0.05"/>
+                <geom name="el05_l6_visual" pos="0 0 -0.0755" quat="1.32679e-06 1 0 0" type="mesh" contype="0" conaffinity="0"
+                  rgba="0.301961 0.290196 0.262745 1" mesh="el05_l6"/>
+                <geom name="jaw_visual" pos="0 0 -0.0755" quat="1.32679e-06 1 0 0" type="mesh" contype="0" conaffinity="0"
+                  rgba="0.972549 0.529412 0.00392157 1" mesh="jaw"/>
+                
+                <body name="gripper_link" pos="0 0 -0.074">
+                  <inertial pos="0 0 0" mass="0.05" diaginertia="0.0001 0.0001 0.0001"/>
+                  <joint name="L7_joint" pos="0 0 0" axis="0 0 1" range="-1.5708 1.5708" actuatorfrcrange="-6 6" damping="0.05" frictionloss="0.05"/>
+                <site name="gripper_tip_site" pos="0 0 -0.12" size="0.005" rgba="0 1 0 1" type="sphere"/>
+                <!--  末端执行器上显示红（X）、绿（Y）、蓝（Z）三色坐标轴  -->
+                  <geom name="ee_x_axis" type="cylinder" fromto="0 0 -0.12 -0.08 0 -0.12" size="0.002" rgba="1 0 0 1" contype="0" conaffinity="0"/>
+                  <geom name="ee_y_axis" type="cylinder" fromto="0 0 -0.12 0 -0.08 -0.12" size="0.002" rgba="0 1 0 1" contype="0" conaffinity="0"/>
+                  <geom name="ee_z_axis" type="cylinder" fromto="0 0 -0.12 0 0 -0.2" size="0.002" rgba="0 0 1 1" contype="0" conaffinity="0"/>
+               </body>
+              </body>
+            </body>
+          </body>
+        </body>
+      </body>
+    </body>
+  </worldbody>
+
+  <sensor>
+    <framepos name="gripper_tip_site_pos" objtype="site" objname="gripper_tip_site"/>
+    <framequat name="gripper_tip_site_quat" objtype="site" objname="gripper_tip_site"/>
+    <jointactuatorfrc name="L1_frc" joint="L1_joint"/>
+    <jointactuatorfrc name="L2_frc" joint="L2_joint"/>
+    <jointactuatorfrc name="L3_frc" joint="L3_joint"/>
+    <jointactuatorfrc name="L4_frc" joint="L4_joint"/>
+    <jointactuatorfrc name="L5_frc" joint="L5_joint"/>
+    <jointactuatorfrc name="L6_frc" joint="L6_joint"/>
+    <jointactuatorfrc name="L7_frc" joint="L7_joint"/>
+  </sensor>
+
+  <actuator>
+    <position name="L1" joint="L1_joint" kp="100" ctrlrange="-2.79253 2.79253" forcerange="-14 14"/>
+    <position name="L2" joint="L2_joint" kp="100" ctrlrange="0 3.66519" forcerange="-14 14"/>
+    <position name="L3" joint="L3_joint" kp="100" ctrlrange="-4.01426 0" forcerange="-14 14"/>
+    <position name="L4" joint="L4_joint" kp="80" ctrlrange="-1.0472 1.5708" forcerange="-6 6"/>
+    <position name="L5" joint="L5_joint" kp="50" ctrlrange="-1.5708 1.5708" forcerange="-6 6"/>
+    <position name="L6" joint="L6_joint" kp="50" ctrlrange="-1.5708 1.5708" forcerange="-6 6"/>
+    <position name="L7" joint="L7_joint" kp="20" ctrlrange="-1.5708 1.5708" forcerange="-6 6"/>
+  </actuator>
+</mujoco>

@@ -439,6 +439,10 @@ class CartesianControlWindow(QMainWindow):
         self._step_size = 0.01
         self._rot_step = np.radians(5.0)
         self._dt = 0.05
+        self._ik_conv_tol = 0.0005  # IK 收敛容差 0.5mm（原 2mm）
+        # 耦合检测容差（自适应：取 step 的 10%，再 clamp）
+        self._pos_drift_tol = 0.001   # 占位，实际由 _calc_drift_tolerances 动态计算
+        self._rot_drift_tol = np.radians(0.5)
 
         self._configuration: mink.Configuration | None = None
         self._ee_task: mink.FrameTask | None = None
@@ -749,6 +753,109 @@ class CartesianControlWindow(QMainWindow):
             orientation_cost=1.0,
         )
 
+    # ------------------------------------------------------------------
+    # IK 耦合验证：求解后检查未命令轴是否漂移
+    # ------------------------------------------------------------------
+
+    def _calc_drift_tolerances(self, pos_step: float, rot_step: float):
+        """根据当前步长计算耦合检测容差。返回 (pos_tol_m, rot_tol_rad)。"""
+        pos_tol = np.clip(pos_step * 0.1, 0.0005, 0.003)   # step 的 10%，clamp [0.5mm, 3mm]
+        rot_tol = np.clip(rot_step * 0.1, np.radians(0.5), np.radians(3.0))
+        return pos_tol, rot_tol
+
+    def _validate_ik_result(
+        self,
+        target_pos: np.ndarray | None,
+        target_rot: np.ndarray | None,
+        pos_tol: float,
+        rot_tol: float,
+        check_axes_pos: tuple[int, ...] | None = None,
+        check_axes_rot: tuple[int, ...] | None = None,
+        caller: str = "",
+    ) -> tuple[bool, str]:
+        """验证 IK 结果是否满足耦合约束。
+
+        check_axes_pos: 需要检查的位置轴索引（0=x,1=y,2=z），None=全查
+        check_axes_rot: 需要检查的旋转轴索引（0=x,1=y,2=z），None=全查
+
+        返回 (ok, reason)。ok=False 时 reason 说明哪个轴超标。
+        每次调用都会写入日志，包含目标值、实际值、各轴误差和判定结果。
+        """
+        if self._configuration is None:
+            return False, "mink 未初始化"
+
+        actual_pos = self._configuration.data.site_xpos[ee_site_id].copy()
+        actual_rot = self._configuration.data.site_xmat[ee_site_id].reshape(3, 3).copy()
+
+        log_lines = [f"[耦合验证] {caller}"]
+
+        # --- 位置漂移 ---
+        if target_pos is not None:
+            pos_err = np.abs(actual_pos - target_pos)
+            pos_axes = check_axes_pos if check_axes_pos is not None else (0, 1, 2)
+            axis_name = {0: "X", 1: "Y", 2: "Z"}
+            log_lines.append(
+                f"  位置目标: [{target_pos[0]*1000:.2f}, {target_pos[1]*1000:.2f}, {target_pos[2]*1000:.2f}]mm"
+            )
+            log_lines.append(
+                f"  位置实际: [{actual_pos[0]*1000:.2f}, {actual_pos[1]*1000:.2f}, {actual_pos[2]*1000:.2f}]mm"
+            )
+            log_lines.append(
+                f"  位置误差: [{pos_err[0]*1000:.3f}, {pos_err[1]*1000:.3f}, {pos_err[2]*1000:.3f}]mm  "
+                f"容差: {pos_tol*1000:.3f}mm"
+            )
+            log_lines.append(
+                f"  检查轴(位置): {[axis_name[a] for a in pos_axes]}"
+            )
+            for a in pos_axes:
+                if pos_err[a] > pos_tol:
+                    reason = (
+                        f"位置 {axis_name[a]} 轴漂移 {pos_err[a]*1000:.2f}mm "
+                        f"> 容差 {pos_tol*1000:.2f}mm"
+                    )
+                    log_lines.append(f"  ❌ 拒绝: {reason}")
+                    self._pose_logger.info("\n".join(log_lines))
+                    return False, reason
+
+        # --- 姿态漂移（逐轴检查 R/P/Y） ---
+        if target_rot is not None:
+            drift_mat = target_rot.T @ actual_rot
+            # 从旋转误差矩阵的反对称部分提取各轴角度误差
+            e = (drift_mat - drift_mat.T) / 2.0
+            rot_errors = [abs(e[2, 1]), abs(e[0, 2]), abs(e[1, 0])]
+            rot_axes = check_axes_rot if check_axes_rot is not None else (0, 1, 2)
+            axis_name = {0: "Roll", 1: "Pitch", 2: "Yaw"}
+            log_lines.append(
+                f"  姿态误差: R={np.degrees(rot_errors[0]):.3f}° "
+                f"P={np.degrees(rot_errors[1]):.3f}° "
+                f"Y={np.degrees(rot_errors[2]):.3f}°  "
+                f"容差: {np.degrees(rot_tol):.3f}°"
+            )
+            log_lines.append(
+                f"  检查轴(姿态): {[axis_name[a] for a in rot_axes]}"
+            )
+            for a in rot_axes:
+                if rot_errors[a] > rot_tol:
+                    reason = (
+                        f"姿态 {axis_name[a]} 漂移 {np.degrees(rot_errors[a]):.2f}° "
+                        f"> 容差 {np.degrees(rot_tol):.2f}°"
+                    )
+                    log_lines.append(f"  ❌ 拒绝: {reason}")
+                    self._pose_logger.info("\n".join(log_lines))
+                    return False, reason
+
+        log_lines.append("  ✅ 通过")
+        self._pose_logger.info("\n".join(log_lines))
+        return True, ""
+
+    def _calc_ik_steps(self, error_norm: float) -> int:
+        """根据笛卡尔空间误差大小动态计算 IK 迭代次数。
+
+        规则：至少 5 次，每 2mm 误差增加 1 次迭代。
+        小步长不浪费算力，大步长保证收敛。
+        """
+        return max(5, int(np.ceil(error_norm / 0.002)))
+
     def _solve_velocity_ik(
         self,
         target_pos: np.ndarray | None,
@@ -816,7 +923,7 @@ class CartesianControlWindow(QMainWindow):
 
             if target_pos is not None:
                 actual_pos = self._configuration.data.site_xpos[ee_site_id]
-                if np.linalg.norm(actual_pos - target_pos) < 0.002:
+                if np.linalg.norm(actual_pos - target_pos) < self._ik_conv_tol:
                     self._log_pose(mode, caller, current_pos, current_quat, target_pos, target_rot, i + 1, n_steps)
                     return True
 
@@ -1272,9 +1379,24 @@ class CartesianControlWindow(QMainWindow):
         else:
             target_rot = self._get_current_rot_matrix()
 
-        ok = self._solve_velocity_ik(target_pos, target_rot=target_rot, n_steps=5, caller="gamepad")
+        pos_error = np.linalg.norm(target_pos - pos)
+        rot_error = angle if angle > 1e-8 else 0.0
+        n_steps = self._calc_ik_steps(max(pos_error, rot_error))
+        ok = self._solve_velocity_ik(target_pos, target_rot=target_rot, n_steps=n_steps, caller="gamepad")
         if not ok:
             return
+
+        # 耦合检测（手柄模式：全轴检查）
+        pos_tol, rot_tol = self._calc_drift_tolerances(
+            max(pos_error, 0.001), max(rot_error, 0.01))
+        passed, reason = self._validate_ik_result(
+            target_pos, target_rot, pos_tol, rot_tol,
+            check_axes_pos=(0, 1, 2),
+            check_axes_rot=(0, 1, 2),
+            caller="gamepad",
+        )
+        if not passed:
+            return  # 手柄静默拒绝，不刷状态栏
 
         self._sync_config_to_global()
 
@@ -1406,9 +1528,24 @@ class CartesianControlWindow(QMainWindow):
         delta[{"x": 0, "y": 1, "z": 2}[axis]] = direction * self._step_size
         target_pos = pos + rot @ delta
 
-        ok = self._solve_velocity_ik(target_pos, target_rot=None, n_steps=5, caller=f"move_{axis}")
+        pos_error = np.linalg.norm(target_pos - pos)
+        n_steps = self._calc_ik_steps(pos_error)
+        ok = self._solve_velocity_ik(target_pos, target_rot=None, n_steps=n_steps, caller=f"move_{axis}")
         if not ok:
             self._status_bar.showMessage("逆运动学求解失败")
+            return
+
+        # 耦合检测：验证未命令的轴没有超标漂移
+        pos_tol, rot_tol = self._calc_drift_tolerances(self._step_size, self._rot_step)
+        uncmd_pos_axes = {"x": (1, 2), "y": (0, 2), "z": (0, 1)}[axis]
+        passed, reason = self._validate_ik_result(
+            target_pos, rot, pos_tol, rot_tol,
+            check_axes_pos=uncmd_pos_axes,  # Y/Z, X/Z, 或 X/Y
+            check_axes_rot=(0, 1, 2),        # Roll, Pitch, Yaw 全部检查
+            caller=f"move_{axis}",
+        )
+        if not passed:
+            self._status_bar.showMessage(f"⚠ 安全拒绝: {reason}，指令未执行")
             return
 
         self._sync_config_to_global()
@@ -1449,15 +1586,31 @@ class CartesianControlWindow(QMainWindow):
 
         pos = self._get_current_ee_pos()
         cur_quat = self._get_current_quat()  # [x, y, z, w]
+        cur_rot = self._get_current_rot_matrix()
         delta_angle = direction * self._rot_step
         dq = self._delta_quat(axis, delta_angle)
         # 四元数乘法：cur_quat 再 dq（局部坐标系旋转）
         new_quat = Rotation.from_quat(cur_quat) * Rotation.from_quat(dq)
         target_rot = new_quat.as_matrix()
 
-        ok = self._solve_velocity_ik(None, target_rot=target_rot, n_steps=5, caller=f"rotate_{axis}")
+        rot_error = np.linalg.norm(Rotation.from_matrix(target_rot @ cur_rot.T).as_rotvec())
+        n_steps = self._calc_ik_steps(rot_error)
+        ok = self._solve_velocity_ik(None, target_rot=target_rot, n_steps=n_steps, caller=f"rotate_{axis}")
         if not ok:
             self._status_bar.showMessage("逆运动学求解失败")
+            return
+
+        # 耦合检测：旋转模式下检查位置漂移 + 未命令的旋转轴
+        pos_tol, rot_tol = self._calc_drift_tolerances(self._step_size, self._rot_step)
+        uncmd_rot_axes = {"roll": (1, 2), "pitch": (0, 2), "yaw": (0, 1)}[axis]
+        passed, reason = self._validate_ik_result(
+            pos, target_rot, pos_tol, rot_tol,
+            check_axes_pos=None,        # 位置全部检查
+            check_axes_rot=uncmd_rot_axes,  # 只检查未命令的旋转轴
+            caller=f"rotate_{axis}",
+        )
+        if not passed:
+            self._status_bar.showMessage(f"⚠ 安全拒绝: {reason}，指令未执行")
             return
 
         self._sync_config_to_global()

@@ -474,6 +474,7 @@ class CartesianControlWindow(QMainWindow):
 
         self._init_ui()
 
+        self._home_timer = None
         self._render_timer = QTimer(self)
         self._render_timer.timeout.connect(self._render_tick)
 
@@ -808,8 +809,8 @@ class CartesianControlWindow(QMainWindow):
                 vel[gripper_vel_idx] = max(vel[gripper_vel_idx], min_vel)
 
             self._configuration.integrate_inplace(vel, self._dt)
-            self._configuration.q[gripper_qpos_index] = np.clip(
-                self._configuration.q[gripper_qpos_index],
+            self._configuration.data.qpos[gripper_qpos_index] = np.clip(
+                self._configuration.data.qpos[gripper_qpos_index],
                 GRIPPER_JOINT_MIN, GRIPPER_JOINT_MAX,
             )
 
@@ -1187,9 +1188,9 @@ class CartesianControlWindow(QMainWindow):
         lx = read_axis(0)
         ly = read_axis(1)
 
-        # DEBUG: 打印原始轴值
-        if abs(joy.axes[0]) > 0.01 or abs(joy.axes[1]) > 0.01:
-            print(f"[DEBUG] axes raw: X={joy.axes[0]:.4f} Y={joy.axes[1]:.4f} | filtered: lx={lx:.4f} ly={ly:.4f}")
+        # DEBUG: 打印原始轴值 (已禁用, 避免干扰终端)
+        # if abs(joy.axes[0]) > 0.01 or abs(joy.axes[1]) > 0.01:
+        #     print(f"[DEBUG] axes raw: X={joy.axes[0]:.4f} Y={joy.axes[1]:.4f} | filtered: lx={lx:.4f} ly={ly:.4f}")
 
         vx = -ly * speed
         vy = lx * speed
@@ -1245,12 +1246,9 @@ class CartesianControlWindow(QMainWindow):
             self._imu_status.setText("IMU: 关闭 (按 - 切换)")
 
         btn_a = len(joy.buttons) > 0 and joy.buttons[0]
-        btn_b = len(joy.buttons) > 1 and joy.buttons[1]
 
         if btn_a and not self._prev_btn[0]:
             self._cycle_gamepad_speed()
-        if btn_b and not self._prev_btn[1]:
-            self._move_home()
 
         self._prev_btn = list(joy.buttons[:16])
 
@@ -1396,10 +1394,11 @@ class CartesianControlWindow(QMainWindow):
                 with lock:
                     for i, idx in enumerate(arm_qpos_indices):
                         data.qpos[idx] = seed[i]
-                        self._configuration.q[idx] = seed[i]
+                        self._configuration.data.qpos[idx] = seed[i]
                     fix_base_position(model, data)
+                    fix_base_position(self._configuration.model, self._configuration.data)
                     mujoco.mj_forward(model, data)
-                self._configuration.update(self._configuration.data.qpos)
+                    mujoco.mj_forward(self._configuration.model, self._configuration.data)
 
         pos = self._get_current_ee_pos()
         rot = self._get_current_rot_matrix()
@@ -1442,10 +1441,11 @@ class CartesianControlWindow(QMainWindow):
                 with lock:
                     for i, idx in enumerate(arm_qpos_indices):
                         data.qpos[idx] = seed[i]
-                        self._configuration.q[idx] = seed[i]
+                        self._configuration.data.qpos[idx] = seed[i]
                     fix_base_position(model, data)
+                    fix_base_position(self._configuration.model, self._configuration.data)
                     mujoco.mj_forward(model, data)
-                self._configuration.update(self._configuration.data.qpos)
+                    mujoco.mj_forward(self._configuration.model, self._configuration.data)
 
         pos = self._get_current_ee_pos()
         cur_quat = self._get_current_quat()  # [x, y, z, w]
@@ -1478,30 +1478,56 @@ class CartesianControlWindow(QMainWindow):
         self._refresh_position()
 
     def _move_home(self):
+        if self._home_timer is not None:
+            return
         if self._viewer is None or not self._viewer.is_running():
             self._status_bar.showMessage("请先启动视图")
             return
         if self._configuration is None:
             return
 
-        home_q = np.zeros(N_ARM)
+        # 记录当前关节位置，启动插值动画
+        self._home_start_q = np.array(
+            [self._configuration.data.qpos[idx] for idx in arm_qpos_indices], dtype=float
+        )
+        self._home_target_q = np.zeros(N_ARM)
+        self._home_step = 0
+        self._home_total_steps = 40  # ~0.8s @ 50Hz
+        self._status_bar.showMessage("正在回零...")
+        self._home_timer = QTimer(self)
+        self._home_timer.timeout.connect(self._home_tick)
+        self._home_timer.start(20)  # 50Hz
+
+    def _home_tick(self):
+        self._home_step += 1
+        t = min(self._home_step / self._home_total_steps, 1.0)
+        # 平滑插值 (ease-in-out)
+        t_smooth = t * t * (3 - 2 * t)
+        q_interp = self._home_start_q + (self._home_target_q - self._home_start_q) * t_smooth
+
         with lock:
             for i, idx in enumerate(arm_qpos_indices):
-                self._configuration.q[idx] = home_q[i]
+                self._configuration.data.qpos[idx] = q_interp[i]
             fix_base_position(self._configuration.model, self._configuration.data)
             mujoco.mj_forward(self._configuration.model, self._configuration.data)
 
         self._sync_config_to_global()
 
-        if self._mode == "real" and self._real_manager.is_connected:
-            try:
-                self._real_manager.send_joint_command(home_q)
-            except Exception as e:
-                self._status_bar.showMessage(f"回零失败: {e}")
-                return
+        if t >= 1.0:
+            self._home_timer.stop()
+            self._home_timer.deleteLater()
+            self._home_timer = None
 
-        self._status_bar.showMessage("已回零")
-        self._refresh_position()
+            # 实体机器人
+            if self._mode == "real" and self._real_manager.is_connected:
+                try:
+                    self._real_manager.send_joint_command(self._home_target_q)
+                except Exception as e:
+                    self._status_bar.showMessage(f"回零失败: {e}")
+                    return
+
+            self._status_bar.showMessage("已回零")
+            self._refresh_position()
 
     def _refresh_position(self):
         try:

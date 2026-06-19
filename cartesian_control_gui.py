@@ -159,6 +159,11 @@ class JoyConReader:
         self._hidraw_fd = None
         self._threads = []
         self._running = False
+        # 摇杆零点校准
+        self._stick_center = [0.0, 0.0]  # X/Y 轴中心偏移
+        self._stick_calibrated = False
+        self._stick_calib_samples = [[], []]
+        self._stick_calib_start = 0.0
 
     def connect(self) -> bool:
         if not EVDEV_AVAILABLE:
@@ -236,21 +241,47 @@ class JoyConReader:
         self.connected = False
 
     def _stick_loop(self):
+        self._stick_calib_start = time.time()
         try:
             for event in self._evdev_dev.read_loop():
                 if not self._running:
                     break
                 if event.type == 3:
-                    if event.code == 0: self.axes[0] = event.value / 32767.0
-                    elif event.code == 1: self.axes[1] = event.value / 32767.0
+                    if event.code == 0:
+                        if not self._stick_calibrated:
+                            self._stick_calib_samples[0].append(event.value)
+                        self.axes[0] = (event.value - self._stick_center[0]) / 32767.0
+                    elif event.code == 1:
+                        if not self._stick_calibrated:
+                            self._stick_calib_samples[1].append(event.value)
+                        self.axes[1] = (event.value - self._stick_center[1]) / 32767.0
                     elif event.code == 16: self._dpad_x = event.value  # ABS_HAT0X
                     elif event.code == 17: self._dpad_y = event.value  # ABS_HAT0Y
+                    # 校准结束检查
+                    if not self._stick_calibrated and time.time() - self._stick_calib_start > 0.5:
+                        self._finish_stick_calibration()
                 elif event.type == 1:
                     idx = self.BTN_MAP.get(event.code)
                     if idx is not None:
                         self.buttons[idx] = event.value
+                    if event.code == 544:   self._dpad_y = -event.value  # BTN_DPAD_UP
+                    elif event.code == 545: self._dpad_y = event.value   # BTN_DPAD_DOWN
+                    elif event.code == 546: self._dpad_x = -event.value  # BTN_DPAD_LEFT
+                    elif event.code == 547: self._dpad_x = event.value   # BTN_DPAD_RIGHT
         except Exception:
             self.connected = False
+
+    def _finish_stick_calibration(self):
+        """用中位数计算摇杆零点（抗异常值）"""
+        self._stick_calibrated = True
+        for i in range(2):
+            if self._stick_calib_samples[i]:
+                sorted_vals = sorted(self._stick_calib_samples[i])
+                self._stick_center[i] = sorted_vals[len(sorted_vals) // 2]
+            else:
+                self._stick_center[i] = 0.0
+        self._stick_calib_samples = [[], []]
+        print(f"[JoyCon] 摇杆零点校准完成: X={self._stick_center[0]:.1f} Y={self._stick_center[1]:.1f}")
 
     def _imu_loop(self):
         GYRO_SCALE = 2000.0 / 32767.0
@@ -296,6 +327,13 @@ class JoyConReader:
                 # Byte 3: Left Joy-Con buttons (D-pad + SL/SR/L/ZL)
                 btn_byte = raw[3]
                 self.buttons[0] = (btn_byte >> 0) & 1  # Down
+                # 回读完整 D-pad 状态，防止 evdev 丢失松开事件导致 _dpad 卡住
+                dpad_down  = (btn_byte >> 0) & 1
+                dpad_up    = (btn_byte >> 1) & 1
+                dpad_right = (btn_byte >> 2) & 1
+                dpad_left  = (btn_byte >> 3) & 1
+                self._dpad_x = dpad_right - dpad_left
+                self._dpad_y = dpad_down - dpad_up
                 self.buttons[5] = (btn_byte >> 4) & 1  # SL
                 self.buttons[7] = (btn_byte >> 5) & 1  # SR
                 self.buttons[4] = (btn_byte >> 6) & 1  # L

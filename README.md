@@ -17,9 +17,14 @@
 pip install PySide6 mujoco mink qpsolvers daqp numpy
 ```
 
-真机模式额外需要：
+Joy-Con 手柄控制额外需要：
 ```bash
 pip install python-evdev
+```
+
+真机模式额外需要安装 el_a3_sdk：
+```bash
+cd el_a3_sdk && pip install -e .
 ```
 
 ## Joy-Con IMU 权限设置

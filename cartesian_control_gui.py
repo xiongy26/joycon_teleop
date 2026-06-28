@@ -27,6 +27,7 @@ from PySide6.QtWidgets import (
     QMainWindow,
     QMessageBox,
     QPushButton,
+    QSlider,
     QTabWidget,
     QVBoxLayout,
     QWidget,
@@ -62,6 +63,15 @@ from core.gripper_config import GRIPPER_JOINT_MAX, GRIPPER_JOINT_MIN
 
 import threading
 import struct
+
+# Joint control constants
+JOINT_LIMITS_DEG = {
+    1: (-160.0, 160.0), 2: (0.0, 210.0), 3: (-230.0, 0.0),
+    4: (-90.0, 90.0), 5: (-90.0, 90.0), 6: (-90.0, 90.0),
+    7: (-90.0, 90.0),
+}
+JOINT_COLORS = ["#e74c3c", "#2ecc71", "#3498db", "#9b59b6", "#f39c12", "#1abc9c", "#e67e22"]
+SLIDER_RESOLUTION = 1000
 
 
 class RealRobotManager:
@@ -476,6 +486,18 @@ class CartesianControlWindow(QMainWindow):
         self._pose_logger.addHandler(fh)
         self._pose_logger.info(f"=== 日志开始: {log_file.name} ===")
 
+        # Joint control panel state
+        self._joint_updating = False
+        self._joint_sliders = []
+        self._joint_spinboxes = []
+        self._joint_feedback_labels = []
+        self._joint_move_timer = None
+        self._joint_move_start_q = None
+        self._joint_move_target_q = None
+        self._joint_move_target_gripper = 0.0
+        self._joint_move_step = 0
+        self._joint_move_total_steps = 0
+
         self._init_ui()
 
         self._home_timer = None
@@ -728,6 +750,115 @@ class CartesianControlWindow(QMainWindow):
         tab_motion_layout.addStretch()
 
         self._tabs.addTab(tab_motion, "运动控制")
+
+        # Tab 3: Joint control
+        tab_joint = QWidget()
+        tab_joint_layout = QVBoxLayout(tab_joint)
+        tab_joint_layout.setContentsMargins(0, 8, 0, 0)
+
+        joint_group = QGroupBox("关节控制")
+        joint_grid = QGridLayout(joint_group)
+        joint_grid.setSpacing(4)
+
+        # Headers
+        headers = ["关节", "控制滑块", "目标角度", "当前角度"]
+        for col, h in enumerate(headers):
+            lbl = QLabel(h)
+            lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
+            lbl.setStyleSheet("font-weight: bold;")
+            joint_grid.addWidget(lbl, 0, col)
+
+        joint_names = ["L1", "L2", "L3", "L4", "L5", "L6", "L7"]
+
+        for i in range(7):
+            row = i + 1
+            joint_id = i + 1
+            lo, hi = JOINT_LIMITS_DEG[joint_id]
+
+            # Name label
+            name_lbl = QLabel(joint_names[i])
+            name_lbl.setStyleSheet(f"color: {JOINT_COLORS[i]}; font-weight: bold; font-size: 14px;")
+            name_lbl.setFixedWidth(30)
+            joint_grid.addWidget(name_lbl, row, 0)
+
+            # Slider
+            slider = QSlider(Qt.Orientation.Horizontal)
+            slider.setRange(0, SLIDER_RESOLUTION)
+            mid = int((0.0 - lo) / (hi - lo) * SLIDER_RESOLUTION) if hi != lo else SLIDER_RESOLUTION // 2
+            slider.setValue(max(0, min(SLIDER_RESOLUTION, mid)))
+            slider.valueChanged.connect(lambda v, idx=i: self._on_joint_slider_changed(idx, v))
+            self._joint_sliders.append(slider)
+            joint_grid.addWidget(slider, row, 1)
+
+            # SpinBox
+            spinbox = QDoubleSpinBox()
+            spinbox.setRange(lo, hi)
+            spinbox.setDecimals(1)
+            spinbox.setSingleStep(1.0)
+            spinbox.setSuffix("°")
+            spinbox.setFixedWidth(85)
+            spinbox.setValue(0.0 if lo <= 0.0 <= hi else lo)
+            spinbox.valueChanged.connect(lambda v, idx=i: self._on_joint_spinbox_changed(idx, v))
+            self._joint_spinboxes.append(spinbox)
+            joint_grid.addWidget(spinbox, row, 2)
+
+            # Feedback label
+            fb_label = QLabel("0.0°")
+            fb_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+            fb_label.setFixedWidth(70)
+            fb_label.setStyleSheet(f"color: {JOINT_COLORS[i]}; font-family: monospace;")
+            self._joint_feedback_labels.append(fb_label)
+            joint_grid.addWidget(fb_label, row, 3)
+
+        joint_grid.setColumnStretch(0, 0)
+        joint_grid.setColumnStretch(1, 5)
+        joint_grid.setColumnStretch(2, 0)
+        joint_grid.setColumnStretch(3, 0)
+        tab_joint_layout.addWidget(joint_group)
+
+        # Buttons
+        btn_layout = QHBoxLayout()
+        self._joint_zero_btn = QPushButton("回零")
+        self._joint_zero_btn.setFixedHeight(30)
+        self._joint_zero_btn.clicked.connect(self._joint_go_zero)
+        btn_layout.addWidget(self._joint_zero_btn)
+
+        self._joint_sync_btn = QPushButton("同步当前位置")
+        self._joint_sync_btn.setFixedHeight(30)
+        self._joint_sync_btn.clicked.connect(self._joint_sync_to_sim)
+        btn_layout.addWidget(self._joint_sync_btn)
+
+        btn_layout.addWidget(QLabel("运动时长:"))
+        self._joint_duration_spin = QDoubleSpinBox()
+        self._joint_duration_spin.setRange(0.2, 30.0)
+        self._joint_duration_spin.setDecimals(1)
+        self._joint_duration_spin.setSingleStep(0.5)
+        self._joint_duration_spin.setValue(1.0)
+        self._joint_duration_spin.setSuffix(" s")
+        self._joint_duration_spin.setFixedWidth(80)
+        btn_layout.addWidget(self._joint_duration_spin)
+
+        btn_layout.addStretch()
+
+        self._joint_send_btn = QPushButton("发送指令")
+        self._joint_send_btn.setFixedHeight(30)
+        self._joint_send_btn.setStyleSheet("QPushButton { background-color: #2980b9; color: white; font-weight: bold; }")
+        self._joint_send_btn.clicked.connect(self._joint_send_command)
+        btn_layout.addWidget(self._joint_send_btn)
+
+        tab_joint_layout.addLayout(btn_layout)
+
+        # Current joint angles display
+        angles_group = QGroupBox("当前关节角度 (rad)")
+        angles_layout = QVBoxLayout(angles_group)
+        self._joint_angles_label = QLabel("---")
+        self._joint_angles_label.setStyleSheet("font-family: monospace; font-size: 12px;")
+        angles_layout.addWidget(self._joint_angles_label)
+        tab_joint_layout.addWidget(angles_group)
+
+        tab_joint_layout.addStretch()
+
+        self._tabs.addTab(tab_joint, "关节控制")
 
         # Status bar
         self._status_bar = QStatusBar()
@@ -1697,6 +1828,197 @@ class CartesianControlWindow(QMainWindow):
         except Exception:
             self._pos_label.setText("位置: (未初始化)")
             self._rpy_label.setText("RPY: (未初始化)")
+
+        # Update joint feedback
+        self._update_joint_feedback()
+
+    # ---- Joint control methods ----
+
+    def _joint_slider_to_deg(self, joint_idx, slider_val):
+        lo, hi = JOINT_LIMITS_DEG[joint_idx + 1]
+        return lo + (hi - lo) * slider_val / SLIDER_RESOLUTION
+
+    def _joint_deg_to_slider(self, joint_idx, deg_val):
+        lo, hi = JOINT_LIMITS_DEG[joint_idx + 1]
+        if hi == lo:
+            return SLIDER_RESOLUTION // 2
+        return int((deg_val - lo) / (hi - lo) * SLIDER_RESOLUTION)
+
+    def _on_joint_slider_changed(self, idx, val):
+        if self._joint_updating:
+            return
+        deg = self._joint_slider_to_deg(idx, val)
+        self._joint_updating = True
+        self._joint_spinboxes[idx].setValue(deg)
+        self._joint_updating = False
+
+    def _on_joint_spinbox_changed(self, idx, val):
+        if self._joint_updating:
+            return
+        self._joint_updating = True
+        self._joint_sliders[idx].setValue(self._joint_deg_to_slider(idx, val))
+        self._joint_updating = False
+
+    def _joint_send_command(self):
+        if self._joint_move_timer is not None:
+            return
+        if self._viewer is None or not self._viewer.is_running():
+            self._status_bar.showMessage("请先启动视图")
+            return
+        if self._configuration is None:
+            self._status_bar.showMessage("mink 未初始化")
+            return
+
+        # Read target joint angles from spinboxes (degrees -> radians)
+        q_target = np.zeros(N_ARM)
+        for i in range(N_ARM):
+            q_target[i] = np.radians(self._joint_spinboxes[i].value())
+        gripper_target = np.clip(
+            np.radians(self._joint_spinboxes[6].value()),
+            GRIPPER_JOINT_MIN, GRIPPER_JOINT_MAX,
+        )
+
+        # Current joint angles
+        q_start = np.array(
+            [self._configuration.data.qpos[idx] for idx in arm_qpos_indices],
+            dtype=float,
+        )
+
+        # If already at target, skip
+        if np.allclose(q_start, q_target, atol=1e-4) and \
+           abs(self._configuration.data.qpos[gripper_qpos_index] - gripper_target) < 1e-4:
+            self._status_bar.showMessage("已在目标位置")
+            return
+
+        # Setup interpolation
+        duration = self._joint_duration_spin.value()
+        tick_ms = 20  # 50Hz, same as render timer
+        total_steps = max(1, int(duration * 1000 / tick_ms))
+
+        self._joint_move_start_q = q_start.copy()
+        self._joint_move_target_q = q_target.copy()
+        self._joint_move_target_gripper = gripper_target
+        self._joint_move_start_gripper = float(
+            self._configuration.data.qpos[gripper_qpos_index]
+        )
+        self._joint_move_step = 0
+        self._joint_move_total_steps = total_steps
+
+        self._status_bar.showMessage(f"关节运动中 ({duration:.1f}s)...")
+        self._joint_move_timer = QTimer(self)
+        self._joint_move_timer.timeout.connect(self._joint_move_tick)
+        self._joint_move_timer.start(tick_ms)
+
+    def _joint_move_tick(self):
+        self._joint_move_step += 1
+        t = min(self._joint_move_step / self._joint_move_total_steps, 1.0)
+        # Smooth ease-in-out
+        t_smooth = t * t * (3 - 2 * t)
+
+        q_interp = self._joint_move_start_q + \
+            (self._joint_move_target_q - self._joint_move_start_q) * t_smooth
+        gripper_interp = self._joint_move_start_gripper + \
+            (self._joint_move_target_gripper - self._joint_move_start_gripper) * t_smooth
+
+        with lock:
+            for i, idx in enumerate(arm_qpos_indices):
+                self._configuration.data.qpos[idx] = q_interp[i]
+                data.qpos[idx] = q_interp[i]
+            self._configuration.data.qpos[gripper_qpos_index] = gripper_interp
+            data.qpos[gripper_qpos_index] = gripper_interp
+            fix_base_position(model, data)
+            fix_base_position(self._configuration.model, self._configuration.data)
+            mujoco.mj_forward(model, data)
+            mujoco.mj_forward(self._configuration.model, self._configuration.data)
+
+        if t >= 1.0:
+            self._joint_move_timer.stop()
+            self._joint_move_timer.deleteLater()
+            self._joint_move_timer = None
+
+            # Send final target to real robot
+            if self._mode == "real" and self._real_manager.is_connected:
+                try:
+                    self._real_manager.send_joint_command(self._joint_move_target_q)
+                except Exception as e:
+                    self._status_bar.showMessage(f"实机指令发送失败: {e}")
+                    return
+
+            self._status_bar.showMessage("关节运动完成")
+            self._refresh_position()
+
+    def _joint_go_zero(self):
+        if self._viewer is None or not self._viewer.is_running():
+            self._status_bar.showMessage("请先启动视图")
+            return
+
+        self._joint_updating = True
+        for i in range(7):
+            lo, hi = JOINT_LIMITS_DEG[i + 1]
+            zero_val = 0.0 if lo <= 0.0 <= hi else lo
+            self._joint_spinboxes[i].setValue(zero_val)
+            self._joint_sliders[i].setValue(self._joint_deg_to_slider(i, zero_val))
+        self._joint_updating = False
+
+        self._joint_send_command()
+
+    def _joint_sync_to_sim(self):
+        """Sync sliders/spinboxes to current simulation joint angles."""
+        if self._configuration is None:
+            return
+        self._joint_updating = True
+        for i in range(N_ARM):
+            deg = np.degrees(self._configuration.q[arm_qpos_indices[i]])
+            lo, hi = JOINT_LIMITS_DEG[i + 1]
+            deg = np.clip(deg, lo, hi)
+            self._joint_spinboxes[i].setValue(deg)
+            self._joint_sliders[i].setValue(self._joint_deg_to_slider(i, deg))
+        # Gripper
+        gripper_deg = np.degrees(self._configuration.q[gripper_qpos_index])
+        lo, hi = JOINT_LIMITS_DEG[7]
+        gripper_deg = np.clip(gripper_deg, lo, hi)
+        self._joint_spinboxes[6].setValue(gripper_deg)
+        self._joint_sliders[6].setValue(self._joint_deg_to_slider(6, gripper_deg))
+        self._joint_updating = False
+
+    def _update_joint_feedback(self):
+        """Update joint feedback labels from sim or real robot."""
+        if not self._joint_feedback_labels:
+            return
+
+        # Get joint angles
+        if self._mode == "real" and self._real_manager.is_connected:
+            fb = self._real_manager.get_joint_feedback()
+            if fb is not None:
+                angles_rad = fb
+            else:
+                angles_rad = None
+        else:
+            if self._configuration is not None:
+                angles_rad = np.array(
+                    [self._configuration.q[idx] for idx in arm_qpos_indices], dtype=float
+                )
+            else:
+                angles_rad = None
+
+        if angles_rad is None:
+            return
+
+        for i in range(N_ARM):
+            deg = np.degrees(angles_rad[i])
+            self._joint_feedback_labels[i].setText(f"{deg:+.1f}°")
+
+        # Gripper feedback
+        if self._configuration is not None:
+            gripper_deg = np.degrees(self._configuration.q[gripper_qpos_index])
+            self._joint_feedback_labels[6].setText(f"{gripper_deg:+.1f}°")
+
+        # Update joint angles rad display
+        if self._configuration is not None:
+            all_angles = [self._configuration.q[idx] for idx in arm_qpos_indices]
+            all_angles.append(self._configuration.q[gripper_qpos_index])
+            angles_str = "  ".join(f"L{i+1}={a:+.3f}" for i, a in enumerate(all_angles))
+            self._joint_angles_label.setText(angles_str)
 
     def closeEvent(self, event):
         self._gamepad_timer.stop()

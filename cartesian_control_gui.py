@@ -60,6 +60,7 @@ from core.ik_core import (
     rotation_matrix_to_quat,
 )
 from core.gripper_config import GRIPPER_JOINT_MAX, GRIPPER_JOINT_MIN
+from ela3_motion import ELA3MotionOptions, ELA3RealtimeController
 
 import threading
 import struct
@@ -78,65 +79,51 @@ class RealRobotManager:
     """Manage EL-A3 real robot connection."""
 
     def __init__(self):
-        self.arm = None
-        self._connected = False
+        self._controller: ELA3RealtimeController | None = None
 
     def connect(self, can_name: str = "can0", kp: float = 0.5, kd: float = 0.01):
-        from core.real_robot_trajectory import (
-            RealRobotOptions,
-            _connect_real_arm,
-            _ensure_sdk_on_path,
-            _ensure_socketcan_ready,
+        options = ELA3MotionOptions(
+            can_name=can_name,
+            kp=kp,
+            kd=kd,
+            control_rate_hz=200.0,
+            command_rate_hz=50.0,
         )
-        options = RealRobotOptions(can_name=can_name, kp=kp, kd=kd)
-        _ensure_sdk_on_path()
-        _ensure_socketcan_ready(options)
-        self.arm = _connect_real_arm(options)
-        self._connected = True
+        self._controller = ELA3RealtimeController(
+            options,
+            lower_limits=ARM_JOINT_LIMITS_LOWER,
+            upper_limits=ARM_JOINT_LIMITS_UPPER,
+        )
+        self._controller.connect()
 
     def disconnect(self):
-        if self.arm is not None:
-            try: self.arm.stop_control_loop()
-            except Exception: pass
-            try: self.arm.DisableArm()
-            except Exception: pass
-            try: self.arm.DisconnectPort()
-            except Exception: pass
-            self.arm = None
-            self._connected = False
+        if self._controller is not None:
+            self._controller.close()
+            self._controller = None
 
     def get_joint_feedback(self) -> np.ndarray | None:
-        if self.arm is None:
+        if self._controller is None:
             return None
-        try:
-            joints = self.arm.GetArmJointMsgs()
-            if joints is None or joints.timestamp <= 0:
-                return None
-            values = np.array(joints.to_list(include_gripper=False)[:N_ARM], dtype=float)
-            if len(values) != N_ARM or np.any(~np.isfinite(values)):
-                return None
-            return np.clip(values, ARM_JOINT_LIMITS_LOWER, ARM_JOINT_LIMITS_UPPER)
-        except Exception:
-            return None
+        return self._controller.read_arm_joints()
 
-    def send_joint_command(self, q_target: np.ndarray):
-        if self.arm is None:
+    def send_joint_command(
+        self,
+        q_target: np.ndarray,
+        *,
+        start_q: np.ndarray | None = None,
+    ):
+        if self._controller is None:
             return
-        from core.real_robot_trajectory import build_sdk_queue_trajectory
-        start_q = self.get_joint_feedback()
-        if start_q is None:
-            start_q = np.zeros(N_ARM)
-        joint_plan = [start_q, np.array(q_target, dtype=float)]
-        trajectory, _ = build_sdk_queue_trajectory(
-            joint_plan, sample_period_s=1/200, control_period_s=1/200,
-            max_joint_velocity_rad_s=2.0, start_q=start_q,
+        self._controller.submit_joint_target(
+            q_target,
+            dt=0.02,
+            start_q=start_q,
+            block=False,
         )
-        if trajectory:
-            self.arm._execute_trajectory_async(trajectory, block=False)
 
     @property
     def is_connected(self):
-        return self._connected
+        return self._controller is not None and self._controller.is_connected
 
 try:
     import evdev
@@ -1495,6 +1482,21 @@ class CartesianControlWindow(QMainWindow):
             return
 
         dt = 0.02
+        start_q = None
+        if self._mode == "real" and self._real_manager.is_connected:
+            start_q = self._real_manager.get_joint_feedback()
+            if start_q is None:
+                self._status_bar.showMessage("游戏手柄实机反馈不可用，指令未发送")
+                return
+            with lock:
+                for i, idx in enumerate(arm_qpos_indices):
+                    data.qpos[idx] = start_q[i]
+                    self._configuration.data.qpos[idx] = start_q[i]
+                fix_base_position(model, data)
+                fix_base_position(self._configuration.model, self._configuration.data)
+                mujoco.mj_forward(model, data)
+                mujoco.mj_forward(self._configuration.model, self._configuration.data)
+
         pos = self._get_current_ee_pos()
         cur_quat = self._get_current_quat()  # [x, y, z, w]
 
@@ -1534,7 +1536,7 @@ class CartesianControlWindow(QMainWindow):
         if self._mode == "real" and self._real_manager.is_connected:
             q = self._get_current_joint_angles()
             try:
-                self._real_manager.send_joint_command(q)
+                self._real_manager.send_joint_command(q, start_q=start_q)
             except Exception as e:
                 self._status_bar.showMessage(f"游戏手柄实机指令发送失败: {e}")
 

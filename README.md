@@ -27,6 +27,11 @@ pip install python-evdev
 cd el_a3_sdk && pip install -e .
 ```
 
+独立部署 `joycon_teleop` 时，还需要随包携带从项目根目录复制来的
+`ela3_motion/` 部署层。GUI 的真机适配器通过
+`ela3_motion.ELA3RealtimeController` 连接、读取反馈并提交 50 Hz 实时关节目标，
+不再直接维护本地真机轨迹队列逻辑。
+
 ## Joy-Con IMU 权限设置
 
 Joy-Con 的摇杆/按键设备和 IMU 传感器是两个独立的 input 设备，普通用户默认只能访问前者。要使用 IMU 姿态控制，需要将当前用户加入 `input` 组：
@@ -54,6 +59,9 @@ python run.py
 ```
 
 ## 真机使用
+
+真机模式依赖随 `joycon_teleop` 一起部署的 `ela3_motion` 实时控制层；该层负责
+CAN/SDK 连接、安全限位、短轨迹加密和队列提交，GUI 只发送实时关节目标。
 
 1. 设置 CAN 接口：
 ```bash

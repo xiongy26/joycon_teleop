@@ -429,10 +429,11 @@ class CartesianControlWindow(QMainWindow):
     def __init__(self):
         super().__init__()
         self.setWindowTitle("EL-A3 笛卡尔控制 (mink 速度逆运动学)")
-        self.setMinimumSize(420, 480)
+        self.setMinimumSize(440, 620)
 
         self._real_manager = RealRobotManager()
         self._mode = "sim"
+        self._real_status_text = "未连接"
         self._step_size = 0.01
         self._rot_step = np.radians(5.0)
         self._dt = 0.05
@@ -543,6 +544,17 @@ class CartesianControlWindow(QMainWindow):
         self._kd_spin.setSingleStep(0.005)
         self._kd_spin.setDecimals(3)
         real_layout.addWidget(self._kd_spin, 1, 1)
+
+        self._real_connect_btn = QPushButton("连接实机")
+        self._real_connect_btn.setStyleSheet(
+            "QPushButton { background-color: #27ae60; color: white; font-weight: bold; }"
+        )
+        self._real_connect_btn.clicked.connect(self._toggle_real_robot)
+        real_layout.addWidget(self._real_connect_btn, 1, 2)
+
+        self._real_status_label = QLabel(self._real_status_text)
+        self._real_status_label.setStyleSheet("color: #888; font-weight: bold;")
+        real_layout.addWidget(self._real_status_label, 1, 3)
         self._real_group.setVisible(False)
         root_layout.addWidget(self._real_group)
 
@@ -641,7 +653,7 @@ class CartesianControlWindow(QMainWindow):
             "L/ZL: Z升降  |  -: 切换IMU  |  A:切换速度  |  B:回零"
         )
         info.setStyleSheet("font-size: 11px; color: #666;")
-        gp_layout.addWidget(info, 3, 0, 1, 4)
+        gp_layout.addWidget(info, 4, 0, 1, 4)
         tab_settings_layout.addWidget(gp_group)
         tab_settings_layout.addStretch()
 
@@ -1124,7 +1136,7 @@ class CartesianControlWindow(QMainWindow):
     @Slot(int)
     def _on_mode_changed(self, index: int):
         self._mode = "sim" if index == 0 else "real"
-        self._real_group.setVisible(self._mode == "real")
+        self._refresh_real_connection_ui()
 
     @Slot(float)
     def _on_step_changed(self, value: float):
@@ -1140,6 +1152,14 @@ class CartesianControlWindow(QMainWindow):
             self._status_bar.showMessage("视图已在运行中")
             return
         if self._mode == "real":
+            if not self._real_manager.is_connected:
+                self._status_bar.showMessage("请先连接实机")
+                QMessageBox.warning(
+                    self,
+                    "未连接实机",
+                    "请先点击“连接实机”，确认连接成功后再启动视图。",
+                )
+                return
             self._start_real_mode()
         else:
             self._start_sim_mode()
@@ -1166,18 +1186,8 @@ class CartesianControlWindow(QMainWindow):
             QMessageBox.critical(self, "启动失败", str(e))
 
     def _start_real_mode(self):
-        can_name = self._can_combo.currentText().strip()
-        kp = self._kp_spin.value()
-        kd = self._kd_spin.value()
-        self._status_bar.showMessage(f"正在连接实机 ({can_name}) ...")
+        self._status_bar.showMessage("正在启动实机视图 ...")
         self._start_btn.setEnabled(False)
-        try:
-            self._real_manager.connect(can_name=can_name, kp=kp, kd=kd)
-        except Exception as e:
-            self._start_btn.setEnabled(True)
-            self._status_bar.showMessage(f"实机连接失败: {e}")
-            QMessageBox.critical(self, "连接失败", str(e))
-            return
 
         seed = self._real_manager.get_joint_feedback()
         if seed is not None:
@@ -1201,10 +1211,81 @@ class CartesianControlWindow(QMainWindow):
             self._stop_btn.setEnabled(True)
             self._status_bar.showMessage("就绪 - 实机模式 (mink 速度逆运动学)")
         except Exception as e:
-            self._real_manager.disconnect()
             self._start_btn.setEnabled(True)
             self._status_bar.showMessage(f"视图启动失败: {e}")
             QMessageBox.critical(self, "视图启动失败", str(e))
+
+    def _toggle_real_robot(self):
+        if self._real_manager.is_connected:
+            self._disconnect_real_robot()
+        else:
+            self._connect_real_robot()
+
+    def _connect_real_robot(self):
+        can_name = self._can_combo.currentText().strip() or "can0"
+        kp = self._kp_spin.value()
+        kd = self._kd_spin.value()
+        self._set_real_connection_pending(f"正在连接 {can_name} ...")
+        try:
+            self._real_manager.connect(can_name=can_name, kp=kp, kd=kd)
+        except Exception as e:
+            self._real_manager.disconnect()
+            self._set_real_connection_state(False, f"连接失败: {e}")
+            self._status_bar.showMessage(f"实机连接失败: {e}")
+            QMessageBox.critical(self, "连接失败", str(e))
+            return
+
+        self._set_real_connection_state(True, f"已连接: {can_name}")
+        self._status_bar.showMessage(f"实机已连接并使能: {can_name}")
+
+    def _disconnect_real_robot(self):
+        if self._mode == "real" and self._viewer is not None:
+            self._on_stop()
+        self._real_connect_btn.setEnabled(False)
+        self._real_status_label.setText("正在断开 ...")
+        self._real_status_label.setStyleSheet("color: #e67e22; font-weight: bold;")
+        try:
+            self._real_manager.disconnect()
+        finally:
+            self._set_real_connection_state(False, "未连接")
+            if self._mode == "real":
+                self._status_bar.showMessage("实机已断开")
+
+    def _set_real_connection_pending(self, text: str):
+        self._real_connect_btn.setEnabled(False)
+        self._real_connect_btn.setText("连接中...")
+        self._real_status_label.setText(text)
+        self._real_status_label.setStyleSheet("color: #e67e22; font-weight: bold;")
+        self._set_real_params_enabled(False)
+
+    def _set_real_connection_state(self, connected: bool, text: str):
+        self._real_status_text = text
+        self._real_connect_btn.setEnabled(True)
+        self._real_connect_btn.setText("断开实机" if connected else "连接实机")
+        if connected:
+            self._real_connect_btn.setStyleSheet(
+                "QPushButton { background-color: #d35400; color: white; font-weight: bold; }"
+            )
+            self._real_status_label.setStyleSheet("color: #2ecc71; font-weight: bold;")
+        else:
+            self._real_connect_btn.setStyleSheet(
+                "QPushButton { background-color: #27ae60; color: white; font-weight: bold; }"
+            )
+            self._real_status_label.setStyleSheet("color: #888; font-weight: bold;")
+        self._real_status_label.setText(text)
+        self._set_real_params_enabled(not connected)
+        self._real_group.setVisible(self._mode == "real" or connected)
+
+    def _set_real_params_enabled(self, enabled: bool):
+        self._can_combo.setEnabled(enabled)
+        self._kp_spin.setEnabled(enabled)
+        self._kd_spin.setEnabled(enabled)
+
+    def _refresh_real_connection_ui(self):
+        if self._real_manager.is_connected:
+            self._set_real_connection_state(True, self._real_status_text)
+        else:
+            self._set_real_connection_state(False, self._real_status_text)
 
     def _render_tick(self):
         if self._viewer is None or not self._viewer.is_running():
@@ -1217,7 +1298,10 @@ class CartesianControlWindow(QMainWindow):
             self._set_buttons_enabled(False)
             self._start_btn.setEnabled(True)
             self._stop_btn.setEnabled(False)
-            self._status_bar.showMessage("视图已关闭")
+            if self._mode == "real" and self._real_manager.is_connected:
+                self._status_bar.showMessage("视图已关闭，实机仍保持连接")
+            else:
+                self._status_bar.showMessage("视图已关闭")
             return
         try:
             cfg_model = self._configuration.model
@@ -1556,12 +1640,13 @@ class CartesianControlWindow(QMainWindow):
             self._viewer_ctx = None
         self._configuration = None
         self._ee_task = None
-        if self._real_manager.is_connected:
-            self._real_manager.disconnect()
         self._set_buttons_enabled(False)
         self._start_btn.setEnabled(True)
         self._stop_btn.setEnabled(False)
-        self._status_bar.showMessage("已停止")
+        if self._mode == "real" and self._real_manager.is_connected:
+            self._status_bar.showMessage("视图已停止，实机仍保持连接")
+        else:
+            self._status_bar.showMessage("已停止")
 
     def _set_buttons_enabled(self, enabled: bool):
         for btn in [

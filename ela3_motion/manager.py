@@ -236,6 +236,8 @@ class ELA3MotionManager:
         backend = self._backend
         backend_owned = False
         seed_q = None
+        sample_period_s = dt if dt is not None else 1.0 / float(self.options.command_rate_hz)
+        planning_diagnostics = {}
         try:
             if not effective_dry_run:
                 if backend is None:
@@ -243,6 +245,8 @@ class ELA3MotionManager:
                     backend_owned = True
                 backend.connect_enable_and_start()
                 seed_q = backend.wait_arm_joints(self.options.feedback_timeout_s)
+                planning_diagnostics["planner_seed_source"] = "real_feedback"
+                planning_diagnostics["planner_seed_q"] = seed_q.tolist()
 
             plan = self._build_strokes_motion_plan(
                 strokes,
@@ -251,7 +255,7 @@ class ELA3MotionManager:
                 seed_q=seed_q,
                 control_orientation=control_orientation,
                 energy_reg=energy_reg,
-                dt=dt if dt is not None else 1.0 / float(self.options.command_rate_hz),
+                dt=sample_period_s,
             )
             trajectory = ELA3Trajectory.from_joint_plan(
                 plan.joint_plan,
@@ -280,6 +284,7 @@ class ELA3MotionManager:
                 _start_q=seed_q,
                 _backend_owned=transfer_backend_owned,
             )
+            result.diagnostics.update(planning_diagnostics)
             result.diagnostics["stroke_count"] = len(strokes)
             result.diagnostics["stroke_points"] = sum(len(stroke) for stroke in strokes)
             result.diagnostics["strokes_ik_method"] = ik_method

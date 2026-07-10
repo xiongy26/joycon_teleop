@@ -22,7 +22,13 @@ def validate_arm_joint_plan(
         raise ValueError(f"joint trajectory must have shape N x 6, got {q.shape}")
     if np.any(~np.isfinite(q)):
         raise ValueError("joint trajectory contains NaN/Inf")
-    if np.any(q < lower_limits - 1e-6) or np.any(q > upper_limits + 1e-6):
+    violated_lower = np.any(q < lower_limits - 1e-6, axis=0)
+    violated_upper = np.any(q > upper_limits + 1e-6, axis=0)
+    if violated_lower.any() or violated_upper.any():
+        print(f"下限越界关节: {np.where(violated_lower)[0]}")
+        print(f"上限越界关节: {np.where(violated_upper)[0]}")
+        print(f"实际范围: min={q.min(axis=0)}, max={q.max(axis=0)}")
+        print(f"配置限位: lower={lower_limits}, upper={upper_limits}")
         raise ValueError("joint trajectory exceeds configured joint limits")
 
     if len(joint_plan) > 1:

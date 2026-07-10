@@ -66,13 +66,23 @@ import threading
 import struct
 
 # Joint control constants
+# A5: 限位从 URDF (model.jnt_range) 动态生成，避免与 SDK/MJCF 不一致
 JOINT_LIMITS_DEG = {
-    1: (-160.0, 160.0), 2: (0.0, 210.0), 3: (-230.0, 0.0),
-    4: (-90.0, 90.0), 5: (-90.0, 90.0), 6: (-90.0, 90.0),
-    7: (-90.0, 90.0),
+    i + 1: (
+        float(np.degrees(ARM_JOINT_LIMITS_LOWER[i])),
+        float(np.degrees(ARM_JOINT_LIMITS_UPPER[i])),
+    )
+    for i in range(N_ARM)
 }
+JOINT_LIMITS_DEG[7] = (
+    float(np.degrees(GRIPPER_JOINT_MIN)),
+    float(np.degrees(GRIPPER_JOINT_MAX)),
+)
 JOINT_COLORS = ["#e74c3c", "#2ecc71", "#3498db", "#9b59b6", "#f39c12", "#1abc9c", "#e67e22"]
 SLIDER_RESOLUTION = 1000
+
+# 判定"是否处于零位"的阈值：任意关节偏离零位超过此值即视为非零位
+HOME_THRESHOLD_RAD = np.radians(1.0)
 
 
 class RealRobotManager:
@@ -120,6 +130,12 @@ class RealRobotManager:
             start_q=start_q,
             block=False,
         )
+
+    def send_gripper_command(self, gripper_angle: float) -> bool:
+        """下发夹爪目标角度（弧度）。"""
+        if self._controller is None:
+            return False
+        return self._controller.submit_gripper_target(gripper_angle)
 
     @property
     def is_connected(self):
@@ -730,8 +746,12 @@ class CartesianControlWindow(QMainWindow):
         self._btn_yo_pos.clicked.connect(lambda: self._rotate("yaw", 1))
         ctrl_layout.addWidget(self._btn_yo_pos, 5, 2)
 
-        self._btn_home = QPushButton("回零")
-        self._btn_home.setStyleSheet("QPushButton { min-height: 40px; font-size: 13px; }")
+        self._btn_home = QPushButton("回零 (Home)")
+        self._btn_home.setStyleSheet(
+            "QPushButton { min-height: 44px; font-size: 15px; font-weight: bold; "
+            "color: white; background-color: #d35400; border-radius: 4px; }"
+            "QPushButton:hover { background-color: #e67e22; }"
+        )
         self._btn_home.clicked.connect(self._move_home)
         ctrl_layout.addWidget(self._btn_home, 6, 0, 1, 3)
         tab_motion_layout.addWidget(ctrl_group)
@@ -739,6 +759,13 @@ class CartesianControlWindow(QMainWindow):
         # Position display
         pos_group = QGroupBox("当前末端执行器位姿")
         pos_layout = QVBoxLayout(pos_group)
+        self._home_warning_label = QLabel("")
+        self._home_warning_label.setStyleSheet(
+            "color: white; background-color: #c0392b; font-weight: bold; "
+            "padding: 4px; border-radius: 3px;"
+        )
+        self._home_warning_label.setVisible(False)
+        pos_layout.addWidget(self._home_warning_label)
         self._pos_label = QLabel("Pos: ---")
         self._pos_label.setStyleSheet("font-family: monospace; font-size: 13px;")
         pos_layout.addWidget(self._pos_label)
@@ -1237,6 +1264,53 @@ class CartesianControlWindow(QMainWindow):
 
         self._set_real_connection_state(True, f"已连接: {can_name}")
         self._status_bar.showMessage(f"实机已连接并使能: {can_name}")
+
+        # 检测当前关节是否处于零位；若不在零位则询问用户是否平滑回零
+        self._prompt_home_after_connect()
+
+    def _prompt_home_after_connect(self):
+        """连接实机后：若关节不在零位，弹窗询问是否先平滑回零。"""
+        feedback = self._real_manager.get_joint_feedback()
+        if feedback is None:
+            self._status_bar.showMessage(
+                "实机已连接，但读不到关节反馈；请手动检查后再运动"
+            )
+            return
+
+        max_dev = float(np.max(np.abs(feedback)))
+        if max_dev <= HOME_THRESHOLD_RAD:
+            self._status_bar.showMessage("实机已连接，当前处于零位")
+            return
+
+        deg_dev = np.degrees(max_dev)
+        joint_str = ", ".join(f"{np.degrees(v):+.1f}°" for v in feedback)
+        reply = QMessageBox.question(
+            self,
+            "机器人当前不在零位",
+            f"检测到机器人未处于零位（最大偏差 {deg_dev:.1f}°）。\n"
+            f"当前关节角度: [{joint_str}]\n\n"
+            "是否现在平滑运动到零位？\n\n"
+            "· 选择「是」：机器人将从当前位置平滑归零\n"
+            "· 选择「否」：保持当前姿态，可稍后点击「回零」按钮",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No,
+        )
+        if reply == QMessageBox.StandardButton.Yes:
+            self._home_real_robot_direct(feedback)
+        else:
+            self._status_bar.showMessage(
+                f"已保留当前姿态（偏差 {deg_dev:.1f}°），请注意安全"
+            )
+
+    def _home_real_robot_direct(self, start_q: np.ndarray):
+        """直接向实机下发一条从当前位姿到零位的平滑回零指令（不依赖 viewer/mink）。"""
+        try:
+            target = np.zeros(N_ARM)
+            self._real_manager.send_joint_command(target, start_q=start_q)
+            self._status_bar.showMessage("已下发回零指令，机器人正在平滑归零...")
+        except Exception as e:
+            self._status_bar.showMessage(f"回零指令下发失败: {e}")
+            QMessageBox.warning(self, "回零失败", str(e))
 
     def _disconnect_real_robot(self):
         if self._mode == "real" and self._viewer is not None:
@@ -1916,8 +1990,36 @@ class CartesianControlWindow(QMainWindow):
             self._pos_label.setText("位置: (未初始化)")
             self._rpy_label.setText("RPY: (未初始化)")
 
+        # Update non-home warning label
+        self._update_home_warning()
+
         # Update joint feedback
         self._update_joint_feedback()
+
+    def _update_home_warning(self):
+        """检测当前关节角度并实时刷新'非零位'警告标签。"""
+        angles = None
+        if self._mode == "real" and self._real_manager.is_connected:
+            angles = self._real_manager.get_joint_feedback()
+        elif self._configuration is not None:
+            angles = np.array(
+                [self._configuration.q[idx] for idx in arm_qpos_indices],
+                dtype=float,
+            )
+
+        if angles is None:
+            self._home_warning_label.setVisible(False)
+            return
+
+        max_dev = float(np.max(np.abs(angles)))
+        if max_dev > HOME_THRESHOLD_RAD:
+            self._home_warning_label.setText(
+                f"⚠ 机器人未处于零位（最大偏差 {np.degrees(max_dev):.1f}°）"
+                f" — 建议点击下方「回零」按钮"
+            )
+            self._home_warning_label.setVisible(True)
+        else:
+            self._home_warning_label.setVisible(False)
 
     # ---- Joint control methods ----
 
@@ -1965,6 +2067,19 @@ class CartesianControlWindow(QMainWindow):
             GRIPPER_JOINT_MIN, GRIPPER_JOINT_MAX,
         )
 
+        # A1: 实机模式下，用真机反馈刷新仿真起点，保证 MuJoCo 与真机同起点
+        if self._mode == "real" and self._real_manager.is_connected:
+            seed = self._real_manager.get_joint_feedback()
+            if seed is not None:
+                with lock:
+                    for i, idx in enumerate(arm_qpos_indices):
+                        data.qpos[idx] = seed[i]
+                        self._configuration.data.qpos[idx] = seed[i]
+                    fix_base_position(model, data)
+                    fix_base_position(self._configuration.model, self._configuration.data)
+                    mujoco.mj_forward(model, data)
+                    mujoco.mj_forward(self._configuration.model, self._configuration.data)
+
         # Current joint angles
         q_start = np.array(
             [self._configuration.data.qpos[idx] for idx in arm_qpos_indices],
@@ -1990,6 +2105,8 @@ class CartesianControlWindow(QMainWindow):
         )
         self._joint_move_step = 0
         self._joint_move_total_steps = total_steps
+        # A2: 逐点下发时，用上一 tick 的插值作为下一段的 start_q
+        self._joint_move_prev_q = q_start.copy()
 
         self._status_bar.showMessage(f"关节运动中 ({duration:.1f}s)...")
         self._joint_move_timer = QTimer(self)
@@ -2018,18 +2135,26 @@ class CartesianControlWindow(QMainWindow):
             mujoco.mj_forward(model, data)
             mujoco.mj_forward(self._configuration.model, self._configuration.data)
 
+        # A2: 每个 tick 用当前插值目标做小段下发，让实机与仿真同步走
+        if self._mode == "real" and self._real_manager.is_connected:
+            try:
+                self._real_manager.send_joint_command(
+                    q_interp, start_q=self._joint_move_prev_q,
+                )
+                # A4: 夹爪 L7 通道也一起下发
+                self._real_manager.send_gripper_command(gripper_interp)
+            except Exception as e:
+                self._status_bar.showMessage(f"实机指令发送失败: {e}")
+                self._joint_move_timer.stop()
+                self._joint_move_timer.deleteLater()
+                self._joint_move_timer = None
+                return
+        self._joint_move_prev_q = q_interp.copy()
+
         if t >= 1.0:
             self._joint_move_timer.stop()
             self._joint_move_timer.deleteLater()
             self._joint_move_timer = None
-
-            # Send final target to real robot
-            if self._mode == "real" and self._real_manager.is_connected:
-                try:
-                    self._real_manager.send_joint_command(self._joint_move_target_q)
-                except Exception as e:
-                    self._status_bar.showMessage(f"实机指令发送失败: {e}")
-                    return
 
             self._status_bar.showMessage("关节运动完成")
             self._refresh_position()

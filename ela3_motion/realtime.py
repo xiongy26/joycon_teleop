@@ -110,6 +110,12 @@ class ELA3RealtimeController:
             return None
         return self._backend.read_arm_joints()
 
+    def submit_gripper_target(self, gripper_angle: float) -> bool:
+        """下发夹爪目标角度（弧度）。控制循环运行时会异步生效。"""
+        if self._backend is None or self._backend.arm is None:
+            return False
+        return bool(self._backend.arm.GripperCtrl(gripper_angle=float(gripper_angle)))
+
     def stop_motion(self) -> None:
         if self._backend is not None:
             self._backend.stop_motion()
@@ -121,12 +127,15 @@ class ELA3RealtimeController:
         dt: float = 0.02,
         start_q: Optional[Sequence[float]] = None,
         block: bool = False,
+        start_limit_tolerance_rad: float = 0.0,
     ) -> RealtimeCommandResult:
         target = self._normalize_joint_vector(q_target, name="q_target")
         start = self._resolve_start_q(start_q)
 
         if dt <= 0:
             raise RealtimeCommandError("dt must be positive")
+
+        start = self._snap_start_to_limits(start, start_limit_tolerance_rad)
 
         joint_plan = [start, target]
         dense_plan = densify_arm_joint_plan(
@@ -212,3 +221,16 @@ class ELA3RealtimeController:
         if np.any(np.isnan(arr)):
             raise RealtimeCommandError(f"{name} contains NaN")
         return arr.copy()
+
+    def _snap_start_to_limits(self, start: np.ndarray, tolerance_rad: float) -> np.ndarray:
+        """Allow tiny feedback drift at the first point while keeping targets strict."""
+
+        tolerance = max(0.0, float(tolerance_rad))
+        below = self._lower_limits - start
+        above = start - self._upper_limits
+        violation = np.maximum(np.maximum(below, above), 0.0)
+        if not np.any(violation > 0.0):
+            return start
+        if np.max(violation) > tolerance + 1e-12:
+            return start
+        return np.clip(start, self._lower_limits, self._upper_limits)

@@ -91,13 +91,20 @@ class RealRobotManager:
     def __init__(self):
         self._controller: ELA3RealtimeController | None = None
 
-    def connect(self, can_name: str = "can0", kp: float = 0.5, kd: float = 0.01):
+    def connect(
+        self,
+        can_name: str = "can0",
+        kp: float = 0.5,
+        kd: float = 0.01,
+        max_vel_rad_s: float = 1.2,
+    ):
         options = ELA3MotionOptions(
             can_name=can_name,
             kp=kp,
             kd=kd,
             control_rate_hz=200.0,
             command_rate_hz=50.0,
+            max_joint_velocity_rad_s=float(max_vel_rad_s),
         )
         self._controller = ELA3RealtimeController(
             options,
@@ -105,6 +112,18 @@ class RealRobotManager:
             upper_limits=ARM_JOINT_LIMITS_UPPER,
         )
         self._controller.connect()
+
+    def set_max_velocity(self, max_vel_rad_s: float) -> bool:
+        """动态调整关节最大速度上限（rad/s），无需重连。"""
+        if self._controller is None:
+            return False
+        # ELA3MotionOptions 为 frozen dataclass，用 with_overrides 生成新实例后整体替换。
+        # ELA3RealtimeController.submit_joint_target 每次都从 self.options 读取，
+        # 因此替换后下一次下发即生效。
+        self._controller.options = self._controller.options.with_overrides(
+            max_joint_velocity_rad_s=float(max_vel_rad_s),
+        )
+        return True
 
     def disconnect(self):
         if self._controller is not None:
@@ -444,7 +463,7 @@ class CartesianControlWindow(QMainWindow):
 
     def __init__(self):
         super().__init__()
-        self.setWindowTitle("EL-A3 笛卡尔控制 (mink 速度逆运动学)")
+        self.setWindowTitle("EL-A3控制")
         self.setMinimumSize(440, 620)
 
         self._real_manager = RealRobotManager()
@@ -560,6 +579,19 @@ class CartesianControlWindow(QMainWindow):
         self._kd_spin.setSingleStep(0.005)
         self._kd_spin.setDecimals(3)
         real_layout.addWidget(self._kd_spin, 1, 1)
+
+        # 关节最大速度上限（deg/s）。默认值与 ELA3MotionOptions 默认 1.2 rad/s 对齐。
+        real_layout.addWidget(QLabel("最大速度 (deg/s):"), 2, 0)
+        self._vmax_spin = QDoubleSpinBox()
+        self._vmax_spin.setRange(5.0, 180.0)
+        self._vmax_spin.setValue(float(np.degrees(1.2)))
+        self._vmax_spin.setSingleStep(5.0)
+        self._vmax_spin.setDecimals(1)
+        self._vmax_spin.setToolTip(
+            "限制真机各关节的最大角速度；下发后立即生效，用于减慢真机运动"
+        )
+        self._vmax_spin.valueChanged.connect(self._on_vmax_changed)
+        real_layout.addWidget(self._vmax_spin, 2, 1)
 
         self._real_connect_btn = QPushButton("连接实机")
         self._real_connect_btn.setStyleSheet(
@@ -1252,9 +1284,15 @@ class CartesianControlWindow(QMainWindow):
         can_name = self._can_combo.currentText().strip() or "can0"
         kp = self._kp_spin.value()
         kd = self._kd_spin.value()
+        max_vel_rad_s = float(np.radians(self._vmax_spin.value()))
         self._set_real_connection_pending(f"正在连接 {can_name} ...")
         try:
-            self._real_manager.connect(can_name=can_name, kp=kp, kd=kd)
+            self._real_manager.connect(
+                can_name=can_name,
+                kp=kp,
+                kd=kd,
+                max_vel_rad_s=max_vel_rad_s,
+            )
         except Exception as e:
             self._real_manager.disconnect()
             self._set_real_connection_state(False, f"连接失败: {e}")
@@ -1401,6 +1439,20 @@ class CartesianControlWindow(QMainWindow):
 
     def _on_imu_toggled(self, checked: bool):
         self._imu_mode_active = checked
+
+    def _on_vmax_changed(self, value_deg_s: float):
+        """最大速度 SpinBox 变化时调用；若实机已连接则立即下发新的上限。"""
+        v_rad_s = float(np.radians(value_deg_s))
+        if self._real_manager.is_connected:
+            self._real_manager.set_max_velocity(v_rad_s)
+            self._status_bar.showMessage(
+                f"实机最大速度已更新: {value_deg_s:.1f} deg/s "
+                f"({v_rad_s:.2f} rad/s)"
+            )
+        else:
+            self._status_bar.showMessage(
+                f"最大速度已设置为 {value_deg_s:.1f} deg/s，连接实机后生效"
+            )
 
     def _update_trajectory(self):
         """记录末端位置并在 user_scn 中绘制轨迹连线。"""

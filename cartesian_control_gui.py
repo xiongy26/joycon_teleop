@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import sys
 import time
+import json
 import os
 import logging
 from datetime import datetime
@@ -21,9 +22,11 @@ from PySide6.QtWidgets import (
     QCheckBox,
     QComboBox,
     QDoubleSpinBox,
+    QFileDialog,
     QGroupBox,
     QHBoxLayout,
     QLabel,
+    QListWidget,
     QMainWindow,
     QMessageBox,
     QPushButton,
@@ -155,6 +158,45 @@ class RealRobotManager:
         if self._controller is None:
             return False
         return self._controller.submit_gripper_target(gripper_angle)
+
+    def _get_arm(self):
+        """获取底层 el_a3_sdk 的 ELA3Interface 实例（供示教用）。"""
+        if self._controller is None:
+            return None
+        backend = getattr(self._controller, "_backend", None)
+        if backend is None:
+            return None
+        return getattr(backend, "arm", None)
+
+    def enter_zero_torque(self, gravity: bool = True,
+                          kd_list: list | None = None) -> bool:
+        """进入零力矩（示教）模式；gravity=True 时启用重力补偿。"""
+        arm = self._get_arm()
+        if arm is None:
+            return False
+        try:
+            if gravity:
+                kd = kd_list or [0.05, 0.05, 0.05, 0.0125, 0.0125, 0.0125, 0.05]
+                return bool(
+                    arm.ZeroTorqueModeWithGravity(
+                        enable=True, kd=kd, update_rate=100.0,
+                    )
+                )
+            return bool(arm.ZeroTorqueMode(enable=True, kd=0.05))
+        except Exception:
+            return False
+
+    def exit_zero_torque(self, gravity: bool = True) -> bool:
+        """退出零力矩模式，回到位置控制。"""
+        arm = self._get_arm()
+        if arm is None:
+            return False
+        try:
+            if gravity:
+                return bool(arm.ZeroTorqueModeWithGravity(enable=False))
+            return bool(arm.ZeroTorqueMode(enable=False))
+        except Exception:
+            return False
 
     @property
     def is_connected(self):
@@ -520,6 +562,37 @@ class CartesianControlWindow(QMainWindow):
         self._joint_move_target_gripper = 0.0
         self._joint_move_step = 0
         self._joint_move_total_steps = 0
+
+        # 示教（零力矩拖动 + 轨迹录制 / 回放）状态
+        self._teach_active = False
+        self._teach_recording = False
+        self._teach_use_gravity = True
+        self._teach_sample_rate = 10.0
+        self._teach_points: list[dict] = []  # [{t, q(list len N_ARM)}]
+        self._teach_rec_start = 0.0
+        self._teach_last_sample = -1e9
+        self._teach_current_traj: list[dict] | None = None
+        self._teach_playback_timer = None
+        self._teach_playback_start_q: np.ndarray | None = None
+        self._teach_playback_prev_q: np.ndarray | None = None
+        self._teach_playback_step = 0
+        self._teach_playback_total = 0
+        self._teach_playback_duration = 0.0
+        self._teach_traj_dir = (
+            Path(__file__).resolve().parent / "logs" / "teach_trajectories"
+        )
+        self._teach_traj_dir.mkdir(parents=True, exist_ok=True)
+        self._teach_rec_timer = None
+        self._teach_status_timer = None
+
+        # 示教点（离散 waypoint）状态
+        self._waypoints: list[dict] = []
+        self._waypoint_move_timer = None
+        self._waypoint_move_start_q: np.ndarray | None = None
+        self._waypoint_move_target_q: np.ndarray | None = None
+        self._waypoint_move_prev_q: np.ndarray | None = None
+        self._waypoint_move_step = 0
+        self._waypoint_move_total = 0
 
         self._init_ui()
 
@@ -918,10 +991,861 @@ class CartesianControlWindow(QMainWindow):
 
         self._tabs.addTab(tab_joint, "关节控制")
 
+        # Tab 4: 示教（零力矩拖动 + 轨迹录制 / 回放）
+        self._build_teach_tab()
+
+        # Tab 5: 示教点（离散关键点管理）
+        self._build_waypoint_tab()
+
         # Status bar
         self._status_bar = QStatusBar()
         self.setStatusBar(self._status_bar)
         self._status_bar.showMessage("就绪")
+
+    # ---- 示教 Tab ----------------------------------------------------
+
+    def _build_teach_tab(self):
+        tab_teach = QWidget()
+        layout = QVBoxLayout(tab_teach)
+        layout.setContentsMargins(0, 8, 0, 0)
+
+        warn = QLabel(
+            "⚠ 示教依赖实机零力矩模式，仅在“实机”模式下已连接时可用；"
+            "启用后请托住机械臂，缓慢移动。"
+        )
+        warn.setWordWrap(True)
+        warn.setStyleSheet(
+            "color: white; background-color: #c0392b; font-weight: bold; "
+            "padding: 6px; border-radius: 3px;"
+        )
+        layout.addWidget(warn)
+
+        # 零力矩模式
+        zt_group = QGroupBox("零力矩拖动")
+        zt_layout = QVBoxLayout(zt_group)
+        self._teach_gravity_check = QCheckBox("启用重力补偿 (推荐)")
+        self._teach_gravity_check.setChecked(True)
+        self._teach_gravity_check.setToolTip(
+            "使用 Pinocchio RNEA 实时补偿重力矩，让拖动更省力"
+        )
+        zt_layout.addWidget(self._teach_gravity_check)
+
+        self._teach_toggle_btn = QPushButton("进入示教模式")
+        self._teach_toggle_btn.setStyleSheet(
+            "QPushButton { min-height: 40px; font-size: 15px; font-weight: bold; "
+            "color: white; background-color: #27ae60; border-radius: 4px; }"
+            "QPushButton:hover { background-color: #2ecc71; }"
+        )
+        self._teach_toggle_btn.clicked.connect(self._on_teach_toggle)
+        zt_layout.addWidget(self._teach_toggle_btn)
+
+        self._teach_mode_label = QLabel("状态: 未启用")
+        self._teach_mode_label.setStyleSheet(
+            "font-family: monospace; color: #888;"
+        )
+        zt_layout.addWidget(self._teach_mode_label)
+        layout.addWidget(zt_group)
+
+        # 轨迹录制
+        rec_group = QGroupBox("轨迹录制")
+        rec_layout = QGridLayout(rec_group)
+        rec_layout.addWidget(QLabel("采样率:"), 0, 0)
+        self._teach_rate_spin = QDoubleSpinBox()
+        self._teach_rate_spin.setRange(1.0, 50.0)
+        self._teach_rate_spin.setValue(10.0)
+        self._teach_rate_spin.setSuffix(" Hz")
+        self._teach_rate_spin.setDecimals(1)
+        self._teach_rate_spin.valueChanged.connect(
+            lambda v: setattr(self, "_teach_sample_rate", float(v))
+        )
+        rec_layout.addWidget(self._teach_rate_spin, 0, 1)
+
+        self._teach_rec_btn = QPushButton("开始录制")
+        self._teach_rec_btn.setStyleSheet(
+            "QPushButton { background-color: #2980b9; color: white; "
+            "font-weight: bold; min-height: 30px; }"
+        )
+        self._teach_rec_btn.clicked.connect(self._on_teach_record_toggle)
+        rec_layout.addWidget(self._teach_rec_btn, 0, 2)
+
+        self._teach_rec_status = QLabel("未录制")
+        self._teach_rec_status.setStyleSheet("color: #888;")
+        rec_layout.addWidget(self._teach_rec_status, 1, 0, 1, 3)
+        layout.addWidget(rec_group)
+
+        # 轨迹列表 + 回放
+        traj_group = QGroupBox("轨迹管理")
+        traj_layout = QVBoxLayout(traj_group)
+        self._teach_traj_list = QListWidget()
+        self._teach_traj_list.setMinimumHeight(120)
+        traj_layout.addWidget(self._teach_traj_list)
+
+        btn_row = QHBoxLayout()
+        self._teach_refresh_btn = QPushButton("刷新列表")
+        self._teach_refresh_btn.clicked.connect(self._teach_refresh_list)
+        btn_row.addWidget(self._teach_refresh_btn)
+
+        self._teach_load_btn = QPushButton("导入 JSON...")
+        self._teach_load_btn.clicked.connect(self._teach_load_file)
+        btn_row.addWidget(self._teach_load_btn)
+
+        self._teach_delete_btn = QPushButton("删除选中")
+        self._teach_delete_btn.clicked.connect(self._teach_delete_selected)
+        btn_row.addWidget(self._teach_delete_btn)
+        traj_layout.addLayout(btn_row)
+
+        play_row = QHBoxLayout()
+        play_row.addWidget(QLabel("回放倍速:"))
+        self._teach_play_speed = QDoubleSpinBox()
+        self._teach_play_speed.setRange(0.1, 5.0)
+        self._teach_play_speed.setValue(1.0)
+        self._teach_play_speed.setDecimals(2)
+        self._teach_play_speed.setSingleStep(0.1)
+        self._teach_play_speed.setSuffix("×")
+        play_row.addWidget(self._teach_play_speed)
+
+        self._teach_play_btn = QPushButton("回放选中")
+        self._teach_play_btn.setStyleSheet(
+            "QPushButton { background-color: #d35400; color: white; "
+            "font-weight: bold; min-height: 30px; }"
+        )
+        self._teach_play_btn.clicked.connect(self._on_teach_play)
+        play_row.addWidget(self._teach_play_btn)
+
+        self._teach_stop_btn = QPushButton("停止回放")
+        self._teach_stop_btn.clicked.connect(self._on_teach_stop_play)
+        play_row.addWidget(self._teach_stop_btn)
+        traj_layout.addLayout(play_row)
+        layout.addWidget(traj_group)
+
+        layout.addStretch()
+        self._tabs.addTab(tab_teach, "示教")
+        self._teach_refresh_list()
+
+    # ---- 示教点 Tab -------------------------------------------------
+
+    def _build_waypoint_tab(self):
+        tab_wp = QWidget()
+        layout = QVBoxLayout(tab_wp)
+        layout.setContentsMargins(0, 8, 0, 0)
+
+        info = QLabel(
+            "示教点：记录若干关键关节位姿，支持插入/删除/拖拽排序、"
+            "JSON 导入导出，以及按顺序移动到指定点。"
+        )
+        info.setWordWrap(True)
+        info.setStyleSheet(
+            "color: #2c3e50; background-color: #ecf0f1; padding: 6px; "
+            "border-radius: 3px;"
+        )
+        layout.addWidget(info)
+
+        wp_group = QGroupBox("示教点列表")
+        wp_layout = QVBoxLayout(wp_group)
+
+        self._wp_list = QListWidget()
+        self._wp_list.setMinimumHeight(220)
+        # 支持拖拽调整示教点顺序
+        self._wp_list.setDragDropMode(QListWidget.DragDropMode.InternalMove)
+        self._wp_list.model().rowsMoved.connect(self._on_wp_rows_moved)
+        wp_layout.addWidget(self._wp_list)
+
+        wp_btn_row1 = QHBoxLayout()
+        self._wp_capture_btn = QPushButton("记录当前点")
+        self._wp_capture_btn.setStyleSheet(
+            "QPushButton { background-color: #16a085; color: white; "
+            "font-weight: bold; min-height: 28px; }"
+        )
+        self._wp_capture_btn.clicked.connect(self._on_wp_capture)
+        wp_btn_row1.addWidget(self._wp_capture_btn)
+
+        self._wp_insert_before_btn = QPushButton("插入到选中前")
+        self._wp_insert_before_btn.setToolTip(
+            "把当前关节角作为新示教点插入到选中项之前"
+        )
+        self._wp_insert_before_btn.clicked.connect(
+            lambda: self._on_wp_insert(after=False)
+        )
+        wp_btn_row1.addWidget(self._wp_insert_before_btn)
+
+        self._wp_insert_after_btn = QPushButton("插入到选中后")
+        self._wp_insert_after_btn.setToolTip(
+            "把当前关节角作为新示教点插入到选中项之后"
+        )
+        self._wp_insert_after_btn.clicked.connect(
+            lambda: self._on_wp_insert(after=True)
+        )
+        wp_btn_row1.addWidget(self._wp_insert_after_btn)
+
+        self._wp_delete_btn = QPushButton("删除选中")
+        self._wp_delete_btn.clicked.connect(self._on_wp_delete)
+        wp_btn_row1.addWidget(self._wp_delete_btn)
+
+        self._wp_clear_btn = QPushButton("清空全部")
+        self._wp_clear_btn.clicked.connect(self._on_wp_clear)
+        wp_btn_row1.addWidget(self._wp_clear_btn)
+        wp_layout.addLayout(wp_btn_row1)
+
+        wp_btn_row2 = QHBoxLayout()
+        self._wp_import_btn = QPushButton("导入 JSON...")
+        self._wp_import_btn.clicked.connect(self._on_wp_import)
+        wp_btn_row2.addWidget(self._wp_import_btn)
+
+        self._wp_export_btn = QPushButton("导出 JSON...")
+        self._wp_export_btn.clicked.connect(self._on_wp_export)
+        wp_btn_row2.addWidget(self._wp_export_btn)
+
+        wp_btn_row2.addWidget(QLabel("移动时长:"))
+        self._wp_duration_spin = QDoubleSpinBox()
+        self._wp_duration_spin.setRange(0.2, 30.0)
+        self._wp_duration_spin.setValue(2.0)
+        self._wp_duration_spin.setSingleStep(0.5)
+        self._wp_duration_spin.setDecimals(1)
+        self._wp_duration_spin.setSuffix(" s")
+        self._wp_duration_spin.setFixedWidth(80)
+        wp_btn_row2.addWidget(self._wp_duration_spin)
+
+        self._wp_goto_btn = QPushButton("移动到选中点")
+        self._wp_goto_btn.setStyleSheet(
+            "QPushButton { background-color: #d35400; color: white; "
+            "font-weight: bold; min-height: 28px; }"
+        )
+        self._wp_goto_btn.clicked.connect(self._on_wp_goto)
+        wp_btn_row2.addWidget(self._wp_goto_btn)
+        wp_layout.addLayout(wp_btn_row2)
+
+        self._wp_status = QLabel("示教点: 0")
+        self._wp_status.setStyleSheet("color: #888; font-family: monospace;")
+        wp_layout.addWidget(self._wp_status)
+        layout.addWidget(wp_group)
+
+        layout.addStretch()
+        self._tabs.addTab(tab_wp, "示教点")
+
+    # ---- 示教：零力矩模式切换 ---------------------------------------
+
+    def _on_teach_toggle(self):
+        if self._teach_active:
+            self._teach_exit()
+        else:
+            self._teach_enter()
+
+    def _teach_enter(self):
+        if self._mode != "real" or not self._real_manager.is_connected:
+            QMessageBox.warning(
+                self, "无法进入示教",
+                "示教需要实机模式并已连接机械臂。请先切到“实机”并连接。",
+            )
+            return
+        if self._teach_playback_timer is not None:
+            QMessageBox.information(self, "示教", "请先停止回放再进入示教。")
+            return
+        use_gravity = self._teach_gravity_check.isChecked()
+        ok = self._real_manager.enter_zero_torque(gravity=use_gravity)
+        if not ok:
+            QMessageBox.critical(
+                self, "示教失败",
+                "无法进入零力矩模式（请检查 SDK 支持与机械臂状态）。",
+            )
+            return
+        self._teach_active = True
+        self._teach_use_gravity = use_gravity
+        self._teach_toggle_btn.setText("退出示教模式")
+        self._teach_toggle_btn.setStyleSheet(
+            "QPushButton { min-height: 40px; font-size: 15px; font-weight: bold; "
+            "color: white; background-color: #c0392b; border-radius: 4px; }"
+            "QPushButton:hover { background-color: #e74c3c; }"
+        )
+        mode_text = "重力补偿" if use_gravity else "基础"
+        self._teach_mode_label.setText(f"状态: 零力矩 ({mode_text}) — 可拖动机械臂")
+        self._teach_mode_label.setStyleSheet(
+            "font-family: monospace; color: #27ae60; font-weight: bold;"
+        )
+        self._teach_gravity_check.setEnabled(False)
+        self._status_bar.showMessage("已进入示教模式，可手动拖动机械臂")
+
+    def _teach_exit(self):
+        # 若正在录制，先停下
+        if self._teach_recording:
+            self._on_teach_record_toggle()
+        ok = self._real_manager.exit_zero_torque(gravity=self._teach_use_gravity)
+        self._teach_active = False
+        self._teach_toggle_btn.setText("进入示教模式")
+        self._teach_toggle_btn.setStyleSheet(
+            "QPushButton { min-height: 40px; font-size: 15px; font-weight: bold; "
+            "color: white; background-color: #27ae60; border-radius: 4px; }"
+            "QPushButton:hover { background-color: #2ecc71; }"
+        )
+        self._teach_mode_label.setText("状态: 未启用")
+        self._teach_mode_label.setStyleSheet(
+            "font-family: monospace; color: #888;"
+        )
+        self._teach_gravity_check.setEnabled(True)
+        if ok:
+            self._status_bar.showMessage("已退出示教模式")
+        else:
+            self._status_bar.showMessage("退出示教时接口返回失败，请检查机械臂状态")
+
+    # ---- 示教：录制 ------------------------------------------------
+
+    def _on_teach_record_toggle(self):
+        if self._teach_recording:
+            self._teach_stop_recording()
+        else:
+            self._teach_start_recording()
+
+    def _teach_start_recording(self):
+        if not self._teach_active:
+            QMessageBox.warning(
+                self, "无法录制", "请先进入示教模式再开始录制。"
+            )
+            return
+        self._teach_points = []
+        self._teach_rec_start = time.time()
+        self._teach_last_sample = -1e9
+        self._teach_recording = True
+        self._teach_rec_btn.setText("停止录制")
+        self._teach_rec_btn.setStyleSheet(
+            "QPushButton { background-color: #c0392b; color: white; "
+            "font-weight: bold; min-height: 30px; }"
+        )
+        self._teach_rec_status.setText("录制中... 采样数: 0")
+        self._teach_rec_status.setStyleSheet("color: #e67e22; font-weight: bold;")
+        # 采样定时器：以 2× 采样率触发，靠时间判定去重
+        interval_ms = max(10, int(1000.0 / (self._teach_sample_rate * 2.0)))
+        self._teach_rec_timer = QTimer(self)
+        self._teach_rec_timer.timeout.connect(self._teach_sample_tick)
+        self._teach_rec_timer.start(interval_ms)
+
+    def _teach_sample_tick(self):
+        if not self._teach_recording:
+            return
+        q = self._real_manager.get_joint_feedback()
+        if q is None:
+            return
+        now = time.time()
+        elapsed = now - self._teach_rec_start
+        interval = 1.0 / max(0.1, self._teach_sample_rate)
+        if elapsed - self._teach_last_sample < interval * 0.9:
+            return
+        self._teach_last_sample = elapsed
+        self._teach_points.append({"t": elapsed, "q": [float(v) for v in q]})
+        self._teach_rec_status.setText(
+            f"录制中... 采样数: {len(self._teach_points)}  "
+            f"时长: {elapsed:.1f}s"
+        )
+
+    def _teach_stop_recording(self):
+        self._teach_recording = False
+        if self._teach_rec_timer is not None:
+            self._teach_rec_timer.stop()
+            self._teach_rec_timer.deleteLater()
+            self._teach_rec_timer = None
+        self._teach_rec_btn.setText("开始录制")
+        self._teach_rec_btn.setStyleSheet(
+            "QPushButton { background-color: #2980b9; color: white; "
+            "font-weight: bold; min-height: 30px; }"
+        )
+        n = len(self._teach_points)
+        if n < 2:
+            self._teach_rec_status.setText(
+                f"录制结束，样本过少 ({n})，未保存"
+            )
+            self._teach_rec_status.setStyleSheet("color: #e74c3c;")
+            self._teach_points = []
+            return
+        # 保存
+        ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+        fname = self._teach_traj_dir / f"teach_{ts}.json"
+        data_out = {
+            "name": fname.stem,
+            "created_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+            "sample_rate_hz": float(self._teach_sample_rate),
+            "num_joints": int(N_ARM),
+            "points": self._teach_points,
+        }
+        try:
+            with open(fname, "w", encoding="utf-8") as f:
+                json.dump(data_out, f, indent=2, ensure_ascii=False)
+            self._teach_rec_status.setText(
+                f"已保存 {fname.name}  样本: {n}  时长: "
+                f"{self._teach_points[-1]['t']:.1f}s"
+            )
+            self._teach_rec_status.setStyleSheet(
+                "color: #27ae60; font-weight: bold;"
+            )
+        except Exception as exc:
+            self._teach_rec_status.setText(f"保存失败: {exc}")
+            self._teach_rec_status.setStyleSheet("color: #e74c3c;")
+        self._teach_points = []
+        self._teach_refresh_list()
+
+    # ---- 示教：轨迹管理 --------------------------------------------
+
+    def _teach_refresh_list(self):
+        self._teach_traj_list.clear()
+        try:
+            files = sorted(self._teach_traj_dir.glob("*.json"))
+        except Exception:
+            files = []
+        for f in files:
+            try:
+                with open(f, "r", encoding="utf-8") as fh:
+                    d = json.load(fh)
+                pts = d.get("points", [])
+                dur = pts[-1]["t"] - pts[0]["t"] if len(pts) >= 2 else 0.0
+                self._teach_traj_list.addItem(
+                    f"{f.name}   ({len(pts)} pts, {dur:.1f}s)"
+                )
+            except Exception:
+                self._teach_traj_list.addItem(f"{f.name}   (损坏)")
+
+    def _teach_selected_path(self) -> Optional[Path]:
+        item = self._teach_traj_list.currentItem()
+        if item is None:
+            return None
+        name = item.text().split()[0]
+        p = self._teach_traj_dir / name
+        return p if p.is_file() else None
+
+    def _teach_load_file(self):
+        fname, _ = QFileDialog.getOpenFileName(
+            self, "导入轨迹 JSON", str(self._teach_traj_dir), "JSON (*.json)"
+        )
+        if not fname:
+            return
+        src = Path(fname)
+        if src.parent != self._teach_traj_dir:
+            dst = self._teach_traj_dir / src.name
+            try:
+                dst.write_bytes(src.read_bytes())
+            except Exception as exc:
+                QMessageBox.warning(self, "导入失败", str(exc))
+                return
+        self._teach_refresh_list()
+
+    def _teach_delete_selected(self):
+        p = self._teach_selected_path()
+        if p is None:
+            return
+        reply = QMessageBox.question(
+            self, "删除轨迹",
+            f"确定删除 {p.name} 吗？此操作不可撤销。",
+        )
+        if reply != QMessageBox.StandardButton.Yes:
+            return
+        try:
+            p.unlink()
+        except Exception as exc:
+            QMessageBox.warning(self, "删除失败", str(exc))
+            return
+        self._teach_refresh_list()
+
+    # ---- 示教：回放 ------------------------------------------------
+
+    def _on_teach_play(self):
+        if self._teach_playback_timer is not None:
+            QMessageBox.information(self, "回放", "已在回放中，请先停止。")
+            return
+        if self._teach_active:
+            QMessageBox.warning(
+                self, "无法回放", "请先退出示教模式再回放（回放需要位置控制）。"
+            )
+            return
+        if self._mode != "real" or not self._real_manager.is_connected:
+            QMessageBox.warning(
+                self, "无法回放", "回放需要在“实机”模式下连接机械臂。"
+            )
+            return
+        p = self._teach_selected_path()
+        if p is None:
+            QMessageBox.information(self, "回放", "请先选中一条轨迹。")
+            return
+        try:
+            with open(p, "r", encoding="utf-8") as fh:
+                d = json.load(fh)
+            pts = d.get("points", [])
+        except Exception as exc:
+            QMessageBox.warning(self, "读取失败", str(exc))
+            return
+        if len(pts) < 2:
+            QMessageBox.warning(self, "回放", "轨迹样本过少。")
+            return
+        self._teach_current_traj = pts
+        # 起点：先用当前反馈作为起始点，插到轨迹最前，避免第一段跳变
+        cur_q = self._real_manager.get_joint_feedback()
+        if cur_q is None:
+            QMessageBox.warning(self, "回放", "未能读取当前关节反馈。")
+            return
+        self._teach_playback_start_q = np.array(cur_q, dtype=float)
+        self._teach_playback_prev_q = self._teach_playback_start_q.copy()
+
+        speed = max(0.1, float(self._teach_play_speed.value()))
+        total_duration = (pts[-1]["t"] - pts[0]["t"]) / speed
+        tick_ms = 20
+        self._teach_playback_total = max(1, int(total_duration * 1000 / tick_ms))
+        self._teach_playback_step = 0
+        self._teach_playback_duration = total_duration
+        self._teach_playback_timer = QTimer(self)
+        self._teach_playback_timer.timeout.connect(self._teach_playback_tick)
+        self._teach_playback_timer.start(tick_ms)
+        self._status_bar.showMessage(
+            f"开始回放 {p.name}  速度 {speed:.2f}×  预计 {total_duration:.1f}s"
+        )
+
+    def _teach_playback_tick(self):
+        if self._teach_playback_timer is None or self._teach_current_traj is None:
+            return
+        self._teach_playback_step += 1
+        t_norm = min(
+            self._teach_playback_step / self._teach_playback_total, 1.0
+        )
+        pts = self._teach_current_traj
+        t_traj = pts[0]["t"] + t_norm * (pts[-1]["t"] - pts[0]["t"])
+
+        # 二分找区间
+        lo, hi = 0, len(pts) - 1
+        while lo + 1 < hi:
+            mid = (lo + hi) // 2
+            if pts[mid]["t"] <= t_traj:
+                lo = mid
+            else:
+                hi = mid
+        t0, t1 = pts[lo]["t"], pts[hi]["t"]
+        q0 = np.array(pts[lo]["q"], dtype=float)
+        q1 = np.array(pts[hi]["q"], dtype=float)
+        if t1 <= t0:
+            q_interp = q1
+        else:
+            alpha = (t_traj - t0) / (t1 - t0)
+            q_interp = q0 + (q1 - q0) * alpha
+
+        # 首帧混入 start_q 平滑过渡
+        blend_ratio = min(1.0, self._teach_playback_step / 25.0)  # ~0.5s
+        q_cmd = (
+            (1.0 - blend_ratio) * self._teach_playback_start_q
+            + blend_ratio * q_interp
+        )
+
+        try:
+            self._real_manager.send_joint_command(
+                q_cmd, start_q=self._teach_playback_prev_q,
+            )
+        except Exception as exc:
+            self._status_bar.showMessage(f"回放下发失败: {exc}")
+            self._on_teach_stop_play()
+            return
+        self._teach_playback_prev_q = q_cmd
+
+        if t_norm >= 1.0:
+            self._on_teach_stop_play(finished=True)
+
+    def _on_teach_stop_play(self, finished: bool = False):
+        if self._teach_playback_timer is not None:
+            self._teach_playback_timer.stop()
+            self._teach_playback_timer.deleteLater()
+            self._teach_playback_timer = None
+        self._teach_current_traj = None
+        self._teach_playback_start_q = None
+        self._teach_playback_prev_q = None
+        if finished:
+            self._status_bar.showMessage("回放完成")
+        else:
+            self._status_bar.showMessage("回放已停止")
+
+    # ---- 示教点：记录 / 删除 / 清空 / 导入 / 导出 / 移动 ----
+
+    def _wp_current_joint_angles(self) -> np.ndarray | None:
+        """获取当前关节角度（实机优先反馈，否则用仿真状态）。"""
+        if self._mode == "real" and self._real_manager.is_connected:
+            q = self._real_manager.get_joint_feedback()
+            if q is not None:
+                return np.asarray(q, dtype=float)
+        if self._configuration is not None:
+            return np.array(
+                [self._configuration.q[idx] for idx in arm_qpos_indices],
+                dtype=float,
+            )
+        return None
+
+    def _wp_refresh_list(self):
+        self._wp_list.clear()
+        for i, wp in enumerate(self._waypoints):
+            q_deg = [np.degrees(v) for v in wp["q"]]
+            q_str = " ".join(f"{d:+6.1f}" for d in q_deg)
+            self._wp_list.addItem(f"[{i+1:02d}] {wp['name']}   {q_str}")
+        self._wp_status.setText(f"示教点: {len(self._waypoints)}")
+
+    def _on_wp_capture(self):
+        q = self._wp_current_joint_angles()
+        if q is None:
+            QMessageBox.warning(
+                self, "记录失败",
+                "无法读取当前关节角度（请先启动视图或连接实机）。",
+            )
+            return
+        name = f"P{len(self._waypoints)+1:02d}"
+        self._waypoints.append({
+            "name": name,
+            "q": [float(v) for v in q],
+            "captured_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+        })
+        self._wp_refresh_list()
+        self._wp_list.setCurrentRow(len(self._waypoints) - 1)
+        self._status_bar.showMessage(f"已记录示教点 {name}")
+
+    def _on_wp_insert(self, after: bool = True):
+        """在选中位置的前/后插入当前关节角作为新示教点。"""
+        q = self._wp_current_joint_angles()
+        if q is None:
+            QMessageBox.warning(
+                self, "插入失败",
+                "无法读取当前关节角度（请先启动视图或连接实机）。",
+            )
+            return
+
+        row = self._wp_list.currentRow()
+        if row < 0 or not self._waypoints:
+            # 无选中/空列表：直接追加到末尾
+            insert_idx = len(self._waypoints)
+        else:
+            insert_idx = row + 1 if after else row
+
+        # 名称统一为 P{插入后的序号:02d}；后续再重编所有点保持顺序
+        new_point = {
+            "name": "",  # 稍后统一重命名
+            "q": [float(v) for v in q],
+            "captured_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+        }
+        self._waypoints.insert(insert_idx, new_point)
+        self._wp_renumber()
+        self._wp_refresh_list()
+        self._wp_list.setCurrentRow(insert_idx)
+        self._status_bar.showMessage(
+            f"已在第 {insert_idx + 1} 位插入示教点"
+        )
+
+    def _wp_renumber(self):
+        """按当前列表顺序重新生成默认名称 P01/P02/...（若之前是默认命名）。"""
+        for i, wp in enumerate(self._waypoints):
+            name = wp.get("name", "") or ""
+            # 仅重编默认命名（P?? 形式或空名），保留用户自定义名
+            if (not name) or (
+                len(name) == 3 and name[0] == "P" and name[1:].isdigit()
+            ):
+                wp["name"] = f"P{i+1:02d}"
+
+    def _on_wp_rows_moved(self, _parent, start: int, end: int,
+                          _dest, dest_row: int):
+        """列表拖拽结束后，把内部 _waypoints 顺序同步过来并重编号。"""
+        # Qt 的 rowsMoved：start..end 是原区间，dest_row 是目标位置（在移除前的索引空间）
+        if start < 0 or end < start or start >= len(self._waypoints):
+            return
+        moved = self._waypoints[start:end + 1]
+        del self._waypoints[start:end + 1]
+        # 移除后目标位置需要修正
+        insert_at = dest_row if dest_row <= start else dest_row - (end - start + 1)
+        insert_at = max(0, min(insert_at, len(self._waypoints)))
+        self._waypoints[insert_at:insert_at] = moved
+        self._wp_renumber()
+        self._wp_refresh_list()
+        self._wp_list.setCurrentRow(insert_at)
+        self._status_bar.showMessage("已调整示教点顺序")
+
+    def _on_wp_delete(self):
+        row = self._wp_list.currentRow()
+        if row < 0 or row >= len(self._waypoints):
+            return
+        removed = self._waypoints.pop(row)
+        self._wp_refresh_list()
+        self._status_bar.showMessage(f"已删除示教点 {removed['name']}")
+
+    def _on_wp_clear(self):
+        if not self._waypoints:
+            return
+        reply = QMessageBox.question(
+            self, "清空示教点",
+            f"确定清空全部 {len(self._waypoints)} 个示教点吗？",
+        )
+        if reply != QMessageBox.StandardButton.Yes:
+            return
+        self._waypoints.clear()
+        self._wp_refresh_list()
+        self._status_bar.showMessage("已清空示教点")
+
+    def _on_wp_export(self):
+        if not self._waypoints:
+            QMessageBox.information(self, "导出", "当前没有示教点可导出。")
+            return
+        default = self._teach_traj_dir / (
+            f"waypoints_{datetime.now():%Y%m%d_%H%M%S}.json"
+        )
+        fname, _ = QFileDialog.getSaveFileName(
+            self, "导出示教点", str(default), "JSON (*.json)"
+        )
+        if not fname:
+            return
+        data_out = {
+            "type": "waypoints",
+            "created_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+            "num_joints": int(N_ARM),
+            "points": self._waypoints,
+        }
+        try:
+            with open(fname, "w", encoding="utf-8") as fh:
+                json.dump(data_out, fh, indent=2, ensure_ascii=False)
+        except Exception as exc:
+            QMessageBox.warning(self, "导出失败", str(exc))
+            return
+        self._status_bar.showMessage(
+            f"已导出 {len(self._waypoints)} 个示教点到 {Path(fname).name}"
+        )
+
+    def _on_wp_import(self):
+        fname, _ = QFileDialog.getOpenFileName(
+            self, "导入示教点", str(self._teach_traj_dir), "JSON (*.json)"
+        )
+        if not fname:
+            return
+        try:
+            with open(fname, "r", encoding="utf-8") as fh:
+                d = json.load(fh)
+        except Exception as exc:
+            QMessageBox.warning(self, "导入失败", str(exc))
+            return
+        points = d.get("points") or []
+        if not isinstance(points, list) or not points:
+            QMessageBox.warning(self, "导入失败", "文件中未找到示教点。")
+            return
+        loaded: list[dict] = []
+        for i, item in enumerate(points):
+            if not isinstance(item, dict) or "q" not in item:
+                continue
+            q = item.get("q")
+            if not isinstance(q, list) or len(q) != N_ARM:
+                continue
+            try:
+                q_f = [float(v) for v in q]
+            except Exception:
+                continue
+            loaded.append({
+                "name": str(item.get("name") or f"P{i+1:02d}"),
+                "q": q_f,
+                "captured_at": str(item.get("captured_at") or ""),
+            })
+        if not loaded:
+            QMessageBox.warning(
+                self, "导入失败",
+                f"未解析到有效示教点（要求 q 为长度 {N_ARM} 的浮点数组）。",
+            )
+            return
+        # 若已有点，询问是替换还是追加
+        if self._waypoints:
+            reply = QMessageBox.question(
+                self, "导入示教点",
+                f"已有 {len(self._waypoints)} 个示教点。\n"
+                f"「是」追加 {len(loaded)} 个；「否」用导入数据替换全部。",
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No
+                | QMessageBox.StandardButton.Cancel,
+                QMessageBox.StandardButton.Yes,
+            )
+            if reply == QMessageBox.StandardButton.Cancel:
+                return
+            if reply == QMessageBox.StandardButton.No:
+                self._waypoints = []
+        self._waypoints.extend(loaded)
+        self._wp_refresh_list()
+        self._status_bar.showMessage(
+            f"已导入 {len(loaded)} 个示教点（当前共 {len(self._waypoints)}）"
+        )
+
+    def _on_wp_goto(self):
+        if self._waypoint_move_timer is not None:
+            QMessageBox.information(self, "移动", "已有移动任务在进行。")
+            return
+        if self._teach_active:
+            QMessageBox.warning(
+                self, "无法移动", "请先退出示教模式再移动到示教点。"
+            )
+            return
+        if self._viewer is None or not self._viewer.is_running():
+            QMessageBox.warning(self, "无法移动", "请先启动视图。")
+            return
+        if self._configuration is None:
+            return
+        row = self._wp_list.currentRow()
+        if row < 0 or row >= len(self._waypoints):
+            QMessageBox.information(self, "移动", "请先选中一个示教点。")
+            return
+
+        target = np.asarray(self._waypoints[row]["q"], dtype=float)
+        # 起点：实机反馈优先
+        start = self._wp_current_joint_angles()
+        if start is None:
+            QMessageBox.warning(self, "移动", "无法获取当前关节角度。")
+            return
+        # 同步仿真起点
+        with lock:
+            for i, idx in enumerate(arm_qpos_indices):
+                data.qpos[idx] = start[i]
+                self._configuration.data.qpos[idx] = start[i]
+            fix_base_position(model, data)
+            fix_base_position(self._configuration.model, self._configuration.data)
+            mujoco.mj_forward(model, data)
+            mujoco.mj_forward(self._configuration.model, self._configuration.data)
+
+        duration = float(self._wp_duration_spin.value())
+        tick_ms = 20
+        self._waypoint_move_total = max(1, int(duration * 1000 / tick_ms))
+        self._waypoint_move_step = 0
+        self._waypoint_move_start_q = start.copy()
+        self._waypoint_move_target_q = target.copy()
+        self._waypoint_move_prev_q = start.copy()
+        self._waypoint_move_timer = QTimer(self)
+        self._waypoint_move_timer.timeout.connect(self._wp_move_tick)
+        self._waypoint_move_timer.start(tick_ms)
+        self._status_bar.showMessage(
+            f"移动到 {self._waypoints[row]['name']}  用时 {duration:.1f}s"
+        )
+
+    def _wp_move_tick(self):
+        if self._waypoint_move_timer is None:
+            return
+        self._waypoint_move_step += 1
+        t = min(self._waypoint_move_step / self._waypoint_move_total, 1.0)
+        t_smooth = t * t * (3.0 - 2.0 * t)
+        q_interp = self._waypoint_move_start_q + (
+            self._waypoint_move_target_q - self._waypoint_move_start_q
+        ) * t_smooth
+
+        with lock:
+            for i, idx in enumerate(arm_qpos_indices):
+                self._configuration.data.qpos[idx] = q_interp[i]
+                data.qpos[idx] = q_interp[i]
+            fix_base_position(model, data)
+            fix_base_position(self._configuration.model, self._configuration.data)
+            mujoco.mj_forward(model, data)
+            mujoco.mj_forward(self._configuration.model, self._configuration.data)
+
+        if self._mode == "real" and self._real_manager.is_connected:
+            try:
+                self._real_manager.send_joint_command(
+                    q_interp, start_q=self._waypoint_move_prev_q,
+                )
+            except Exception as exc:
+                self._status_bar.showMessage(f"实机指令发送失败: {exc}")
+                self._waypoint_move_timer.stop()
+                self._waypoint_move_timer.deleteLater()
+                self._waypoint_move_timer = None
+                return
+        self._waypoint_move_prev_q = q_interp.copy()
+
+        if t >= 1.0:
+            self._waypoint_move_timer.stop()
+            self._waypoint_move_timer.deleteLater()
+            self._waypoint_move_timer = None
+            self._status_bar.showMessage("已到达示教点")
+            self._refresh_position()
 
     def _init_mink(self):
         self._configuration = mink.Configuration(model)

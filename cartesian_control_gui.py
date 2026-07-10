@@ -97,8 +97,8 @@ class RealRobotManager:
     def connect(
         self,
         can_name: str = "can0",
-        kp: float = 0.5,
-        kd: float = 0.01,
+        kp: float = 60.0,
+        kd: float = 3.5,
         max_vel_rad_s: float = 1.2,
     ):
         options = ELA3MotionOptions(
@@ -521,6 +521,7 @@ class CartesianControlWindow(QMainWindow):
 
         self._configuration: mink.Configuration | None = None
         self._ee_task: mink.FrameTask | None = None
+        self._ik_limits = None
         self._solver = "daqp"
 
         self._viewer = None
@@ -560,6 +561,7 @@ class CartesianControlWindow(QMainWindow):
         self._joint_move_start_q = None
         self._joint_move_target_q = None
         self._joint_move_target_gripper = 0.0
+        self._joint_target_dirty = [False] * 7
         self._joint_move_step = 0
         self._joint_move_total_steps = 0
 
@@ -641,16 +643,16 @@ class CartesianControlWindow(QMainWindow):
         real_layout.addWidget(self._can_combo, 0, 1)
         real_layout.addWidget(QLabel("Kp:"), 0, 2)
         self._kp_spin = QDoubleSpinBox()
-        self._kp_spin.setRange(0.01, 10.0)
-        self._kp_spin.setValue(0.5)
-        self._kp_spin.setSingleStep(0.1)
+        self._kp_spin.setRange(0.01, 120.0)
+        self._kp_spin.setValue(60.0)
+        self._kp_spin.setSingleStep(5.0)
         real_layout.addWidget(self._kp_spin, 0, 3)
         real_layout.addWidget(QLabel("Kd:"), 1, 0)
         self._kd_spin = QDoubleSpinBox()
-        self._kd_spin.setRange(0.001, 1.0)
-        self._kd_spin.setValue(0.01)
-        self._kd_spin.setSingleStep(0.005)
-        self._kd_spin.setDecimals(3)
+        self._kd_spin.setRange(0.001, 5.0)
+        self._kd_spin.setValue(3.5)
+        self._kd_spin.setSingleStep(0.1)
+        self._kd_spin.setDecimals(2)
         real_layout.addWidget(self._kd_spin, 1, 1)
 
         # 关节最大速度上限（deg/s）。默认值与 ELA3MotionOptions 默认 1.2 rad/s 对齐。
@@ -1865,10 +1867,51 @@ class CartesianControlWindow(QMainWindow):
             position_cost=1.0,
             orientation_cost=1.0,
         )
+        self._ik_limits = [
+            mink.ConfigurationLimit(
+                self._configuration.model,
+                gain=0.95,
+                min_distance_from_limits=1e-4,
+            )
+        ]
 
     # ------------------------------------------------------------------
     # IK 耦合验证：求解后检查未命令轴是否漂移
     # ------------------------------------------------------------------
+
+    def _current_arm_q_from_config(self) -> np.ndarray:
+        """Return the arm joints from the active mink configuration."""
+        if self._configuration is None:
+            return np.zeros(N_ARM, dtype=float)
+        return np.array(
+            [self._configuration.q[idx] for idx in arm_qpos_indices],
+            dtype=float,
+        )
+
+    def _arm_limit_violation_reason(
+        self,
+        q_arm: np.ndarray,
+        *,
+        tol: float = 1e-6,
+    ) -> str | None:
+        q = np.asarray(q_arm, dtype=float)
+        below = np.where(q < ARM_JOINT_LIMITS_LOWER - tol)[0]
+        above = np.where(q > ARM_JOINT_LIMITS_UPPER + tol)[0]
+        if below.size == 0 and above.size == 0:
+            return None
+
+        parts = []
+        for idx in below:
+            parts.append(
+                f"L{idx + 1}={np.degrees(q[idx]):+.2f}° "
+                f"< {np.degrees(ARM_JOINT_LIMITS_LOWER[idx]):+.2f}°"
+            )
+        for idx in above:
+            parts.append(
+                f"L{idx + 1}={np.degrees(q[idx]):+.2f}° "
+                f"> {np.degrees(ARM_JOINT_LIMITS_UPPER[idx]):+.2f}°"
+            )
+        return "，".join(parts)
 
     def _calc_drift_tolerances(self, pos_step: float, rot_step: float):
         """根据当前步长计算耦合检测容差。返回 (pos_tol_m, rot_tol_rad)。"""
@@ -2013,8 +2056,32 @@ class CartesianControlWindow(QMainWindow):
             self._ee_task.set_orientation_cost(1.0)
         self._ee_task.set_target(target_se3)
 
+        start_violation = self._arm_limit_violation_reason(
+            self._current_arm_q_from_config()
+        )
+        if start_violation is not None:
+            self._pose_logger.info(
+                f"[IK限位] {caller} 起点越界，拒绝求解: {start_violation}"
+            )
+            return False
+
         for i in range(n_steps):
-            vel = mink.solve_ik(self._configuration, tasks, self._dt, self._solver)
+            q_before = self._configuration.q.copy()
+            try:
+                vel = mink.solve_ik(
+                    self._configuration,
+                    tasks,
+                    self._dt,
+                    self._solver,
+                    safety_break=True,
+                    limits=self._ik_limits,
+                )
+            except Exception as exc:
+                self._configuration.update(q_before)
+                self._pose_logger.info(
+                    f"[IK限位] {caller} 求解失败，可能目标超出工作空间或关节限位: {exc}"
+                )
+                return False
 
             gripper_vel_idx = gripper_dof_index - min(arm_dof_indices)
             predicted = (
@@ -2033,6 +2100,17 @@ class CartesianControlWindow(QMainWindow):
                 self._configuration.data.qpos[gripper_qpos_index],
                 GRIPPER_JOINT_MIN, GRIPPER_JOINT_MAX,
             )
+            self._configuration.update()
+
+            violation = self._arm_limit_violation_reason(
+                self._current_arm_q_from_config()
+            )
+            if violation is not None:
+                self._configuration.update(q_before)
+                self._pose_logger.info(
+                    f"[IK限位] {caller} 第 {i + 1}/{n_steps} 步越界，已回滚: {violation}"
+                )
+                return False
 
             if target_pos is not None:
                 actual_pos = self._configuration.data.site_xpos[ee_site_id]
@@ -2800,7 +2878,7 @@ class CartesianControlWindow(QMainWindow):
         n_steps = self._calc_ik_steps(pos_error)
         ok = self._solve_velocity_ik(target_pos, target_rot=None, n_steps=n_steps, caller=f"move_{axis}")
         if not ok:
-            self._status_bar.showMessage("逆运动学求解失败")
+            self._status_bar.showMessage("逆运动学求解失败：目标可能超出关节限位或工作空间")
             return
 
         # 耦合检测：验证未命令的轴没有超标漂移
@@ -2865,7 +2943,7 @@ class CartesianControlWindow(QMainWindow):
         n_steps = self._calc_ik_steps(rot_error)
         ok = self._solve_velocity_ik(None, target_rot=target_rot, n_steps=n_steps, caller=f"rotate_{axis}")
         if not ok:
-            self._status_bar.showMessage("逆运动学求解失败")
+            self._status_bar.showMessage("逆运动学求解失败：目标可能超出关节限位或工作空间")
             return
 
         # 耦合检测：旋转模式下检查位置漂移 + 未命令的旋转轴
@@ -3016,6 +3094,7 @@ class CartesianControlWindow(QMainWindow):
         self._joint_updating = True
         self._joint_spinboxes[idx].setValue(deg)
         self._joint_updating = False
+        self._joint_target_dirty[idx] = True
 
     def _on_joint_spinbox_changed(self, idx, val):
         if self._joint_updating:
@@ -3023,6 +3102,30 @@ class CartesianControlWindow(QMainWindow):
         self._joint_updating = True
         self._joint_sliders[idx].setValue(self._joint_deg_to_slider(idx, val))
         self._joint_updating = False
+        self._joint_target_dirty[idx] = True
+
+    def _joint_set_controls_from_angles(
+        self,
+        arm_angles: np.ndarray,
+        gripper_angle: float | None = None,
+        *,
+        mark_clean: bool = True,
+    ):
+        """Update joint target controls from a known robot/simulation state."""
+        self._joint_updating = True
+        for i in range(N_ARM):
+            lo, hi = JOINT_LIMITS_DEG[i + 1]
+            deg = float(np.clip(np.degrees(arm_angles[i]), lo, hi))
+            self._joint_spinboxes[i].setValue(deg)
+            self._joint_sliders[i].setValue(self._joint_deg_to_slider(i, deg))
+        if gripper_angle is not None:
+            lo, hi = JOINT_LIMITS_DEG[7]
+            gripper_deg = float(np.clip(np.degrees(gripper_angle), lo, hi))
+            self._joint_spinboxes[6].setValue(gripper_deg)
+            self._joint_sliders[6].setValue(self._joint_deg_to_slider(6, gripper_deg))
+        self._joint_updating = False
+        if mark_clean:
+            self._joint_target_dirty = [False] * 7
 
     def _joint_send_command(self):
         if self._joint_move_timer is not None:
@@ -3034,16 +3137,8 @@ class CartesianControlWindow(QMainWindow):
             self._status_bar.showMessage("mink 未初始化")
             return
 
-        # Read target joint angles from spinboxes (degrees -> radians)
-        q_target = np.zeros(N_ARM)
-        for i in range(N_ARM):
-            q_target[i] = np.radians(self._joint_spinboxes[i].value())
-        gripper_target = np.clip(
-            np.radians(self._joint_spinboxes[6].value()),
-            GRIPPER_JOINT_MIN, GRIPPER_JOINT_MAX,
-        )
-
         # A1: 实机模式下，用真机反馈刷新仿真起点，保证 MuJoCo 与真机同起点
+        seed = None
         if self._mode == "real" and self._real_manager.is_connected:
             seed = self._real_manager.get_joint_feedback()
             if seed is not None:
@@ -3061,10 +3156,40 @@ class CartesianControlWindow(QMainWindow):
             [self._configuration.data.qpos[idx] for idx in arm_qpos_indices],
             dtype=float,
         )
+        gripper_start = float(self._configuration.data.qpos[gripper_qpos_index])
+
+        # 实机模式下，未编辑的关节保持当前反馈；只让用户改过的轴成为目标。
+        # 否则旧 spinbox 值（常见为 0°）会把其它关节一起拉走。
+        use_dirty_targets = self._mode == "real" and self._real_manager.is_connected
+        q_target = q_start.copy() if use_dirty_targets else np.zeros(N_ARM)
+        for i in range(N_ARM):
+            if not use_dirty_targets or self._joint_target_dirty[i]:
+                q_target[i] = np.radians(self._joint_spinboxes[i].value())
+        if use_dirty_targets and not self._joint_target_dirty[6]:
+            gripper_target = gripper_start
+        else:
+            gripper_target = np.clip(
+                np.radians(self._joint_spinboxes[6].value()),
+                GRIPPER_JOINT_MIN,
+                GRIPPER_JOINT_MAX,
+            )
+
+        delta_deg = np.degrees(q_target - q_start)
+        dirty_axes = [f"L{i + 1}" for i, dirty in enumerate(self._joint_target_dirty[:N_ARM]) if dirty]
+        moved_axes = [f"L{i + 1}={delta_deg[i]:+.2f}°" for i in range(N_ARM) if abs(delta_deg[i]) > 0.05]
+        log_msg = (
+            "[关节控制下发] "
+            f"dirty={dirty_axes or ['none']} "
+            f"delta={moved_axes or ['none']} "
+            f"start={np.array2string(np.degrees(q_start), precision=2, suppress_small=True)}deg "
+            f"target={np.array2string(np.degrees(q_target), precision=2, suppress_small=True)}deg"
+        )
+        self._pose_logger.info(log_msg)
+        print(log_msg, flush=True)
 
         # If already at target, skip
         if np.allclose(q_start, q_target, atol=1e-4) and \
-           abs(self._configuration.data.qpos[gripper_qpos_index] - gripper_target) < 1e-4:
+           abs(gripper_start - gripper_target) < 1e-4:
             self._status_bar.showMessage("已在目标位置")
             return
 
@@ -3076,9 +3201,7 @@ class CartesianControlWindow(QMainWindow):
         self._joint_move_start_q = q_start.copy()
         self._joint_move_target_q = q_target.copy()
         self._joint_move_target_gripper = gripper_target
-        self._joint_move_start_gripper = float(
-            self._configuration.data.qpos[gripper_qpos_index]
-        )
+        self._joint_move_start_gripper = gripper_start
         self._joint_move_step = 0
         self._joint_move_total_steps = total_steps
         # A2: 逐点下发时，用上一 tick 的插值作为下一段的 start_q
@@ -3131,6 +3254,11 @@ class CartesianControlWindow(QMainWindow):
             self._joint_move_timer.stop()
             self._joint_move_timer.deleteLater()
             self._joint_move_timer = None
+            self._joint_set_controls_from_angles(
+                self._joint_move_target_q,
+                self._joint_move_target_gripper,
+                mark_clean=True,
+            )
 
             self._status_bar.showMessage("关节运动完成")
             self._refresh_position()
@@ -3147,27 +3275,32 @@ class CartesianControlWindow(QMainWindow):
             self._joint_spinboxes[i].setValue(zero_val)
             self._joint_sliders[i].setValue(self._joint_deg_to_slider(i, zero_val))
         self._joint_updating = False
+        self._joint_target_dirty = [True] * 7
 
         self._joint_send_command()
 
     def _joint_sync_to_sim(self):
-        """Sync sliders/spinboxes to current simulation joint angles."""
+        """Sync sliders/spinboxes to current simulation or real feedback angles."""
+        if self._mode == "real" and self._real_manager.is_connected:
+            fb = self._real_manager.get_joint_feedback()
+            if fb is None:
+                self._status_bar.showMessage("无法读取实机当前关节反馈")
+                return
+            self._joint_set_controls_from_angles(np.asarray(fb, dtype=float))
+            self._status_bar.showMessage("已同步实机当前关节角度")
+            return
+
         if self._configuration is None:
             return
-        self._joint_updating = True
-        for i in range(N_ARM):
-            deg = np.degrees(self._configuration.q[arm_qpos_indices[i]])
-            lo, hi = JOINT_LIMITS_DEG[i + 1]
-            deg = np.clip(deg, lo, hi)
-            self._joint_spinboxes[i].setValue(deg)
-            self._joint_sliders[i].setValue(self._joint_deg_to_slider(i, deg))
-        # Gripper
-        gripper_deg = np.degrees(self._configuration.q[gripper_qpos_index])
-        lo, hi = JOINT_LIMITS_DEG[7]
-        gripper_deg = np.clip(gripper_deg, lo, hi)
-        self._joint_spinboxes[6].setValue(gripper_deg)
-        self._joint_sliders[6].setValue(self._joint_deg_to_slider(6, gripper_deg))
-        self._joint_updating = False
+        arm_angles = np.array(
+            [self._configuration.q[idx] for idx in arm_qpos_indices],
+            dtype=float,
+        )
+        self._joint_set_controls_from_angles(
+            arm_angles,
+            float(self._configuration.q[gripper_qpos_index]),
+        )
+        self._status_bar.showMessage("已同步仿真当前关节角度")
 
     def _update_joint_feedback(self):
         """Update joint feedback labels from sim or real robot."""

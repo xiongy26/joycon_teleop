@@ -515,6 +515,8 @@ class CartesianControlWindow(QMainWindow):
         self._rot_step = np.radians(5.0)
         self._dt = 0.05
         self._ik_conv_tol = 0.0005  # IK 收敛容差 0.5mm（原 2mm）
+        self._ik_rot_conv_tol = np.radians(0.25)
+        self._ik_hold_cost = 10.0
         # 耦合检测容差（自适应：取 step 的 10%，再 clamp）
         self._pos_drift_tol = 0.001   # 占位，实际由 _calc_drift_tolerances 动态计算
         self._rot_drift_tol = np.radians(0.5)
@@ -2012,6 +2014,15 @@ class CartesianControlWindow(QMainWindow):
         """
         return max(5, int(np.ceil(error_norm / 0.002)))
 
+    @staticmethod
+    def _rotation_error_norm(target_rot: np.ndarray, actual_rot: np.ndarray) -> float:
+        delta = target_rot @ actual_rot.T
+        return float(np.linalg.norm(Rotation.from_matrix(delta).as_rotvec()))
+
+    def _restore_ik_snapshot(self, q_snapshot: np.ndarray) -> None:
+        if self._configuration is not None:
+            self._configuration.update(q_snapshot)
+
     def _solve_velocity_ik(
         self,
         target_pos: np.ndarray | None,
@@ -2026,34 +2037,31 @@ class CartesianControlWindow(QMainWindow):
         current_pos = self._configuration.data.site_xpos[ee_site_id].copy()
         current_rot = self._configuration.data.site_xmat[ee_site_id].reshape(3, 3).copy()
         current_quat = Rotation.from_matrix(current_rot).as_quat()
+        entry_q = self._configuration.q.copy()
 
-        # 根据命令类型设置目标 SE3（位置和方向均使用 1.0 cost 锁定）
+        resolved_target_pos = current_pos.copy()
+        if target_pos is not None:
+            resolved_target_pos = np.asarray(target_pos, dtype=float).copy()
+        resolved_target_rot = current_rot.copy()
+        if target_rot is not None:
+            resolved_target_rot = np.asarray(target_rot, dtype=float).copy()
+
         if target_pos is not None and target_rot is not None:
             mode = "pos+rot"
-            T = np.eye(4)
-            T[:3, :3] = target_rot
-            T[:3, 3] = target_pos
-            target_se3 = mink.SE3.from_matrix(T)
             self._ee_task.set_position_cost(1.0)
             self._ee_task.set_orientation_cost(1.0)
         elif target_rot is not None:
             mode = "rot_only"
-            # 纯旋转：保持当前位置，只更新朝向
-            T = np.eye(4)
-            T[:3, :3] = target_rot
-            T[:3, 3] = current_pos
-            target_se3 = mink.SE3.from_matrix(T)
-            self._ee_task.set_position_cost(1.0)
+            self._ee_task.set_position_cost(self._ik_hold_cost)
             self._ee_task.set_orientation_cost(1.0)
         else:
             mode = "pos_only"
-            # 纯平移：保持当前朝向，只更新位置
-            T = np.eye(4)
-            T[:3, :3] = current_rot
-            T[:3, 3] = target_pos
-            target_se3 = mink.SE3.from_matrix(T)
             self._ee_task.set_position_cost(1.0)
-            self._ee_task.set_orientation_cost(1.0)
+            self._ee_task.set_orientation_cost(self._ik_hold_cost)
+        T = np.eye(4)
+        T[:3, :3] = resolved_target_rot
+        T[:3, 3] = resolved_target_pos
+        target_se3 = mink.SE3.from_matrix(T)
         self._ee_task.set_target(target_se3)
 
         start_violation = self._arm_limit_violation_reason(
@@ -2065,8 +2073,9 @@ class CartesianControlWindow(QMainWindow):
             )
             return False
 
+        last_pos_err = float("inf")
+        last_rot_err = float("inf")
         for i in range(n_steps):
-            q_before = self._configuration.q.copy()
             try:
                 vel = mink.solve_ik(
                     self._configuration,
@@ -2077,7 +2086,7 @@ class CartesianControlWindow(QMainWindow):
                     limits=self._ik_limits,
                 )
             except Exception as exc:
-                self._configuration.update(q_before)
+                self._restore_ik_snapshot(entry_q)
                 self._pose_logger.info(
                     f"[IK限位] {caller} 求解失败，可能目标超出工作空间或关节限位: {exc}"
                 )
@@ -2106,20 +2115,37 @@ class CartesianControlWindow(QMainWindow):
                 self._current_arm_q_from_config()
             )
             if violation is not None:
-                self._configuration.update(q_before)
+                self._restore_ik_snapshot(entry_q)
                 self._pose_logger.info(
                     f"[IK限位] {caller} 第 {i + 1}/{n_steps} 步越界，已回滚: {violation}"
                 )
                 return False
 
-            if target_pos is not None:
-                actual_pos = self._configuration.data.site_xpos[ee_site_id]
-                if np.linalg.norm(actual_pos - target_pos) < self._ik_conv_tol:
-                    self._log_pose(mode, caller, current_pos, current_quat, target_pos, target_rot, i + 1, n_steps)
-                    return True
+            actual_pos = self._configuration.data.site_xpos[ee_site_id]
+            actual_rot = self._configuration.data.site_xmat[ee_site_id].reshape(3, 3)
+            last_pos_err = float(np.linalg.norm(actual_pos - resolved_target_pos))
+            last_rot_err = self._rotation_error_norm(resolved_target_rot, actual_rot)
+            if last_pos_err < self._ik_conv_tol and last_rot_err < self._ik_rot_conv_tol:
+                self._log_pose(
+                    mode, caller, current_pos, current_quat,
+                    resolved_target_pos, resolved_target_rot, i + 1, n_steps,
+                )
+                return True
 
-        self._log_pose(mode, caller, current_pos, current_quat, target_pos, target_rot, n_steps, n_steps)
-        return True
+        self._log_pose(
+            mode, caller, current_pos, current_quat,
+            resolved_target_pos, resolved_target_rot, n_steps, n_steps,
+        )
+        if last_pos_err < self._ik_conv_tol and last_rot_err < self._ik_rot_conv_tol:
+            return True
+
+        self._restore_ik_snapshot(entry_q)
+        self._pose_logger.info(
+            f"[IK收敛] {caller} 未达到完整6D目标，已回滚: "
+            f"pos_err={last_pos_err * 1000:.3f}mm, "
+            f"rot_err={np.degrees(last_rot_err):.3f}°"
+        )
+        return False
 
     def _log_pose(
         self,
@@ -2712,14 +2738,13 @@ class CartesianControlWindow(QMainWindow):
         pos = self._get_current_ee_pos()
         cur_quat = self._get_current_quat()  # [x, y, z, w]
 
-        cur_rot = self._get_current_rot_matrix()
-        target_pos = pos + cur_rot @ np.array([vx, vy, vz]) * dt
+        target_pos = pos + np.array([vx, vy, vz]) * dt
         # 用角速度构造增量四元数，避免 RPY 万向锁
         wvec = np.array([w_roll, w_pitch, w_yaw]) * dt
         angle = np.linalg.norm(wvec)
         if angle > 1e-8:
             dq = Rotation.from_rotvec(wvec).as_quat()
-            new_quat = Rotation.from_quat(cur_quat) * Rotation.from_quat(dq)
+            new_quat = Rotation.from_quat(dq) * Rotation.from_quat(cur_quat)
             target_rot = new_quat.as_matrix()
         else:
             target_rot = self._get_current_rot_matrix()
@@ -2727,8 +2752,15 @@ class CartesianControlWindow(QMainWindow):
         pos_error = np.linalg.norm(target_pos - pos)
         rot_error = angle if angle > 1e-8 else 0.0
         n_steps = self._calc_ik_steps(max(pos_error, rot_error))
-        ok = self._solve_velocity_ik(target_pos, target_rot=target_rot, n_steps=n_steps, caller="gamepad")
+        q_before_ik = self._configuration.q.copy()
+        ok = self._solve_velocity_ik(
+            target_pos,
+            target_rot=target_rot,
+            n_steps=n_steps,
+            caller="gamepad",
+        )
         if not ok:
+            self._restore_ik_snapshot(q_before_ik)
             return
 
         # 耦合检测（手柄模式：全轴检查）
@@ -2741,6 +2773,7 @@ class CartesianControlWindow(QMainWindow):
             caller="gamepad",
         )
         if not passed:
+            self._restore_ik_snapshot(q_before_ik)
             return  # 手柄静默拒绝，不刷状态栏
 
         self._sync_config_to_global()
@@ -2872,12 +2905,19 @@ class CartesianControlWindow(QMainWindow):
         rot = self._get_current_rot_matrix()
         delta = np.zeros(3)
         delta[{"x": 0, "y": 1, "z": 2}[axis]] = direction * self._step_size
-        target_pos = pos + rot @ delta
+        target_pos = pos + delta
 
         pos_error = np.linalg.norm(target_pos - pos)
         n_steps = self._calc_ik_steps(pos_error)
-        ok = self._solve_velocity_ik(target_pos, target_rot=None, n_steps=n_steps, caller=f"move_{axis}")
+        q_before_ik = self._configuration.q.copy()
+        ok = self._solve_velocity_ik(
+            target_pos,
+            target_rot=None,
+            n_steps=n_steps,
+            caller=f"move_{axis}",
+        )
         if not ok:
+            self._restore_ik_snapshot(q_before_ik)
             self._status_bar.showMessage("逆运动学求解失败：目标可能超出关节限位或工作空间")
             return
 
@@ -2891,6 +2931,7 @@ class CartesianControlWindow(QMainWindow):
             caller=f"move_{axis}",
         )
         if not passed:
+            self._restore_ik_snapshot(q_before_ik)
             self._status_bar.showMessage(f"⚠ 安全拒绝: {reason}，指令未执行")
             return
 
@@ -2935,14 +2976,20 @@ class CartesianControlWindow(QMainWindow):
         cur_rot = self._get_current_rot_matrix()
         delta_angle = direction * self._rot_step
         dq = self._delta_quat(axis, delta_angle)
-        # 四元数乘法：cur_quat 再 dq（局部坐标系旋转）
-        new_quat = Rotation.from_quat(cur_quat) * Rotation.from_quat(dq)
+        new_quat = Rotation.from_quat(dq) * Rotation.from_quat(cur_quat)
         target_rot = new_quat.as_matrix()
 
         rot_error = np.linalg.norm(Rotation.from_matrix(target_rot @ cur_rot.T).as_rotvec())
         n_steps = self._calc_ik_steps(rot_error)
-        ok = self._solve_velocity_ik(None, target_rot=target_rot, n_steps=n_steps, caller=f"rotate_{axis}")
+        q_before_ik = self._configuration.q.copy()
+        ok = self._solve_velocity_ik(
+            None,
+            target_rot=target_rot,
+            n_steps=n_steps,
+            caller=f"rotate_{axis}",
+        )
         if not ok:
+            self._restore_ik_snapshot(q_before_ik)
             self._status_bar.showMessage("逆运动学求解失败：目标可能超出关节限位或工作空间")
             return
 
@@ -2956,6 +3003,7 @@ class CartesianControlWindow(QMainWindow):
             caller=f"rotate_{axis}",
         )
         if not passed:
+            self._restore_ik_snapshot(q_before_ik)
             self._status_bar.showMessage(f"⚠ 安全拒绝: {reason}，指令未执行")
             return
 

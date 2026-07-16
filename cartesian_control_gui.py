@@ -62,6 +62,7 @@ from core.ik_core import (
     fix_base_position,
     rotation_matrix_to_quat,
 )
+import core.analytic_ik as analytic_ik
 from core.gripper_config import GRIPPER_JOINT_MAX, GRIPPER_JOINT_MIN
 from ela3_motion import ELA3MotionOptions, ELA3RealtimeController
 
@@ -523,6 +524,19 @@ class CartesianControlWindow(QMainWindow):
         self._ee_task: mink.FrameTask | None = None
         self._ik_limits = None
         self._solver = "daqp"
+
+        # 准解析 IK 开关(默认开启,config.json ik.use_analytic 可关闭)
+        _proj_root = Path(__file__).resolve().parent
+        _cfg_path = _proj_root / "config" / "config.json"
+        _use_ana = True
+        try:
+            if _cfg_path.is_file():
+                with open(_cfg_path, "r", encoding="utf-8") as _cf:
+                    _cfg = json.load(_cf)
+                _use_ana = bool(_cfg.get("ik", {}).get("use_analytic", True))
+        except Exception:
+            pass
+        self._use_analytic_ik = _use_ana
 
         self._viewer = None
         self._viewer_ctx = None
@@ -2012,7 +2026,107 @@ class CartesianControlWindow(QMainWindow):
         """
         return max(5, int(np.ceil(error_norm / 0.002)))
 
+    def _solve_analytic_ik(
+        self,
+        target_pos: np.ndarray | None,
+        target_rot: np.ndarray | None = None,
+        n_steps: int = 15,
+        caller: str = "",
+    ) -> bool:
+        """准解析 IK 入口:位置解析 + 姿态雅可比精修。"""
+        q_current = self._current_arm_q_from_config()
+
+        start_viol = self._arm_limit_violation_reason(q_current)
+        if start_viol is not None:
+            self._pose_logger.info(
+                f"[IK限位] {caller} 起点越界，拒绝求解: {start_viol}"
+            )
+            return False
+
+        # 确定模式和目标
+        actual_pos = self._configuration.data.site_xpos[ee_site_id].copy()
+        actual_rot = self._configuration.data.site_xmat[
+            ee_site_id
+        ].reshape(3, 3).copy()
+
+        if target_pos is not None and target_rot is not None:
+            mode = "pos+rot"
+        elif target_rot is not None:
+            mode = "rot_only"
+            target_pos = actual_pos
+        else:
+            mode = "pos_only"
+            target_rot = actual_rot
+
+        # 调用准解析 IK
+        result = analytic_ik.solve(target_pos, target_rot, q_current)
+        if result is None:
+            self._pose_logger.info(
+                f"[analytic_ik] {caller} 求解失败，回退 mink"
+            )
+            # 回退到 mink
+            return self._solve_velocity_ik_orig(
+                target_pos, target_rot, n_steps, caller
+            )
+        q_target, _err = result
+
+        # 限速:按 n_steps 插值
+        dq = q_target - q_current
+        max_step = max(0.01, 0.5 / max(n_steps, 1))
+        dq_norm = float(np.linalg.norm(dq))
+        if dq_norm > max_step:
+            dq *= max_step / dq_norm
+        q_new = q_current + dq
+
+        # 限位夹紧 + 越界回滚
+        q_new = np.clip(q_new, ARM_JOINT_LIMITS_LOWER, ARM_JOINT_LIMITS_UPPER)
+        viol = self._arm_limit_violation_reason(q_new)
+        if viol is not None:
+            self._pose_logger.info(
+                f"[IK限位] {caller} 求解越界: {viol}"
+            )
+            return False
+
+        # 更新 configuration 和全局 data
+        qpos = self._configuration.q.copy()
+        for i, idx in enumerate(arm_qpos_indices):
+            qpos[idx] = q_new[i]
+        self._configuration.update(qpos)
+        with lock:
+            for i, idx in enumerate(arm_qpos_indices):
+                data.qpos[idx] = q_new[i]
+            fix_base_position(model, data)
+            mujoco.mj_forward(model, data)
+
+        # 收敛检查
+        actual_pos = self._configuration.data.site_xpos[ee_site_id]
+        pos_err = np.linalg.norm(actual_pos - target_pos)
+        converged = pos_err < self._ik_conv_tol
+
+        src_quat = Rotation.from_matrix(actual_rot).as_quat()
+        self._log_pose(
+            mode, caller, actual_pos, src_quat,
+            target_pos, target_rot,
+            1 if converged else n_steps, n_steps,
+        )
+        return True
+
     def _solve_velocity_ik(
+        self,
+        target_pos: np.ndarray | None,
+        target_rot: np.ndarray | None = None,
+        n_steps: int = 15,
+        caller: str = "",
+    ) -> bool:
+        if self._use_analytic_ik:
+            return self._solve_analytic_ik(
+                target_pos, target_rot, n_steps, caller
+            )
+        return self._solve_velocity_ik_orig(
+            target_pos, target_rot, n_steps, caller
+        )
+
+    def _solve_velocity_ik_orig(
         self,
         target_pos: np.ndarray | None,
         target_rot: np.ndarray | None = None,

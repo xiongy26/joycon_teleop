@@ -542,6 +542,7 @@ class CartesianControlWindow(QMainWindow):
         self._gamepad_speed_idx = 2
         self._prev_btn = [0] * 16
         self._imu_mode_active = False  # IMU 姿态模式开关
+        self._gamepad_gripper_target = 0.0  # 手柄控制夹爪目标角度 (rad)
 
         # 初始化位姿控制日志
         log_dir = Path(__file__).resolve().parent / "logs"
@@ -776,8 +777,9 @@ class CartesianControlWindow(QMainWindow):
         gp_layout.addWidget(self._traj_check, 3, 0)
 
         info = QLabel(
-            "摇杆: XY平移  |  SL/SR: 横滚  |  D-pad: 俯仰/偏航\n"
-            "L/ZL: Z升降  |  -: 切换IMU  |  A:切换速度  |  B:回零"
+            "摇杆: XY平移  |  SL: 夹爪闭合  |  SR: 夹爪张开\n"
+            "L/ZL: Z升降  |  D-pad: 俯仰/偏航  |  -: 切换IMU\n"
+            "A: 切换速度  |  B: 回零"
         )
         info.setStyleSheet("font-size: 11px; color: #666;")
         gp_layout.addWidget(info, 4, 0, 1, 4)
@@ -2638,6 +2640,10 @@ class CartesianControlWindow(QMainWindow):
             if self._configuration is None:
                 self._gp_active_check.setChecked(False)
                 return
+            # 同步当前夹爪位置，避免手柄激活时夹爪跳变
+            self._gamepad_gripper_target = float(
+                self._configuration.data.qpos[gripper_qpos_index]
+            )
             self._gamepad_timer.start(20)
             self._status_bar.showMessage("手柄控制已启用")
         else:
@@ -2685,11 +2691,23 @@ class CartesianControlWindow(QMainWindow):
         w_pitch = 0.0
         w_yaw = 0.0
 
-        # Roll: SL=右, SR=左
-        if len(joy.buttons) > 5 and joy.buttons[5]:   # SL
-            w_roll = speed * 2.0
-        if len(joy.buttons) > 7 and joy.buttons[7]:   # SR
-            w_roll = -speed * 2.0
+        # Roll: D-pad 左右 (已移到 D-pad)
+        # SL/SR 改为夹爪控制
+
+        # 夹爪控制：SL=闭合(→0°), SR=张开(→-90°)
+        gripper_step = np.radians(2.0)  # 每 tick 约 2°
+        btn_sl = len(joy.buttons) > 5 and joy.buttons[5]  # SL
+        btn_sr = len(joy.buttons) > 7 and joy.buttons[7]  # SR
+        if btn_sr:  # SR → 张开（角度减小，趋向 -90°）
+            self._gamepad_gripper_target = max(
+                GRIPPER_JOINT_MIN,
+                self._gamepad_gripper_target - gripper_step,
+            )
+        if btn_sl:  # SL → 闭合（角度增大，趋向 0°）
+            self._gamepad_gripper_target = min(
+                GRIPPER_JOINT_MAX,
+                self._gamepad_gripper_target + gripper_step,
+            )
 
         # Pitch/Yaw: D-pad (hat 轴)
         dpad_y = getattr(joy, '_dpad_y', 0)
@@ -2733,7 +2751,8 @@ class CartesianControlWindow(QMainWindow):
         self._prev_btn = list(joy.buttons[:16])
 
         if (abs(vx) < 1e-4 and abs(vy) < 1e-4 and abs(vz) < 1e-4
-                and abs(w_roll) < 1e-4 and abs(w_pitch) < 1e-4 and abs(w_yaw) < 1e-4):
+                and abs(w_roll) < 1e-4 and abs(w_pitch) < 1e-4 and abs(w_yaw) < 1e-4
+                and not btn_sl and not btn_sr):
             return
 
         dt = 0.02
@@ -2801,6 +2820,14 @@ class CartesianControlWindow(QMainWindow):
                 self._real_manager.send_joint_command(q, start_q=start_q)
             except Exception as e:
                 self._status_bar.showMessage(f"游戏手柄实机指令发送失败: {e}")
+
+        # 夹爪指令：SL/SR 按下时持续下发
+        if btn_sl or btn_sr:
+            with lock:
+                self._configuration.data.qpos[gripper_qpos_index] = self._gamepad_gripper_target
+                data.qpos[gripper_qpos_index] = self._gamepad_gripper_target
+            if self._mode == "real" and self._real_manager.is_connected:
+                self._real_manager.send_gripper_command(self._gamepad_gripper_target)
 
         self._refresh_position()
 

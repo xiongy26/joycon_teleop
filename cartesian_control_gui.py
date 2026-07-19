@@ -543,6 +543,8 @@ class CartesianControlWindow(QMainWindow):
         self._prev_btn = [0] * 16
         self._imu_mode_active = False  # IMU 姿态模式开关
         self._gamepad_gripper_target = 0.0  # 手柄控制夹爪目标角度 (rad)
+        self._cartesian_target_pos: np.ndarray | None = None
+        self._cartesian_target_rot: np.ndarray | None = None
 
         # 初始化位姿控制日志
         log_dir = Path(__file__).resolve().parent / "logs"
@@ -776,10 +778,17 @@ class CartesianControlWindow(QMainWindow):
         self._traj_check.toggled.connect(self._on_traj_toggled)
         gp_layout.addWidget(self._traj_check, 3, 0)
 
+        self._cart_zero_btn = QPushButton("重置控制零点")
+        self._cart_zero_btn.setToolTip(
+            "把当前末端位姿设为后续笛卡尔/手柄控制的参考目标"
+        )
+        self._cart_zero_btn.clicked.connect(self._reset_cartesian_control_origin)
+        gp_layout.addWidget(self._cart_zero_btn, 3, 1, 1, 2)
+
         info = QLabel(
             "摇杆: XY平移  |  SL: 夹爪闭合  |  SR: 夹爪张开\n"
             "L/ZL: Z升降  |  D-pad: 俯仰/偏航  |  -: 切换IMU\n"
-            "A: 切换速度  |  B: 回零"
+            "A: 切换速度  |  重置控制零点: 以真机当前位姿继续相对控制"
         )
         info.setStyleSheet("font-size: 11px; color: #666;")
         gp_layout.addWidget(info, 4, 0, 1, 4)
@@ -1864,6 +1873,7 @@ class CartesianControlWindow(QMainWindow):
             self._waypoint_move_timer.stop()
             self._waypoint_move_timer.deleteLater()
             self._waypoint_move_timer = None
+            self._capture_cartesian_control_origin(caller="waypoint_done")
             self._status_bar.showMessage("已到达示教点")
             self._refresh_position()
 
@@ -2236,9 +2246,69 @@ class CartesianControlWindow(QMainWindow):
             fix_base_position(model, data)
             mujoco.mj_forward(model, data)
 
+    def _sync_arm_q_to_configuration(self, q_arm: np.ndarray) -> None:
+        """Sync MuJoCo/mink state to a known arm joint vector."""
+        if self._configuration is None:
+            return
+        q = np.asarray(q_arm, dtype=float)
+        with lock:
+            for i, idx in enumerate(arm_qpos_indices):
+                data.qpos[idx] = q[i]
+                self._configuration.data.qpos[idx] = q[i]
+            fix_base_position(model, data)
+            fix_base_position(self._configuration.model, self._configuration.data)
+            mujoco.mj_forward(model, data)
+            mujoco.mj_forward(self._configuration.model, self._configuration.data)
+
+    def _sync_real_feedback_to_configuration(
+        self,
+        *,
+        caller: str = "",
+        require: bool = True,
+    ) -> np.ndarray | None:
+        """Use real joint feedback as the Cartesian IK seed in real mode."""
+        if self._mode != "real" or not self._real_manager.is_connected:
+            return None
+        seed = self._real_manager.get_joint_feedback()
+        if seed is None:
+            if require:
+                msg = "实机反馈不可用，已拒绝使用仿真位姿下发笛卡尔指令"
+                self._status_bar.showMessage(msg)
+                self._pose_logger.info(f"[实机同步] {caller} {msg}")
+            return None
+        self._sync_arm_q_to_configuration(seed)
+        return np.asarray(seed, dtype=float)
+
+    def _capture_cartesian_control_origin(self, *, caller: str = "") -> bool:
+        """Capture the current end-effector pose as the session-relative target."""
+        if self._configuration is None:
+            return False
+        self._cartesian_target_pos = self._get_current_ee_pos()
+        self._cartesian_target_rot = self._get_current_rot_matrix()
+        rpy = Rotation.from_matrix(self._cartesian_target_rot).as_euler("xyz", degrees=True)
+        self._pose_logger.info(
+            f"[控制零点] {caller} pos="
+            f"{np.array2string(self._cartesian_target_pos, precision=4, suppress_small=True)} "
+            f"rpy_deg={np.array2string(rpy, precision=2, suppress_small=True)}"
+        )
+        return True
+
+    @Slot()
+    def _reset_cartesian_control_origin(self):
+        if self._configuration is None:
+            self._status_bar.showMessage("请先启动视图")
+            return
+        if self._mode == "real" and self._real_manager.is_connected:
+            if self._sync_real_feedback_to_configuration(caller="reset_cartesian_origin") is None:
+                return
+        if self._capture_cartesian_control_origin(caller="manual_reset"):
+            self._status_bar.showMessage("已把当前末端位姿设为笛卡尔控制零点")
+
     @Slot(int)
     def _on_mode_changed(self, index: int):
         self._mode = "sim" if index == 0 else "real"
+        self._cartesian_target_pos = None
+        self._cartesian_target_rot = None
         self._refresh_real_connection_ui()
 
     @Slot(float)
@@ -2272,6 +2342,7 @@ class CartesianControlWindow(QMainWindow):
         self._start_btn.setEnabled(False)
         try:
             self._init_mink()
+            self._capture_cartesian_control_origin(caller="start_sim")
             cfg_data = self._configuration.data
             self._viewer_ctx = mujoco.viewer.launch_passive(
                 model=self._configuration.model, data=cfg_data,
@@ -2293,15 +2364,23 @@ class CartesianControlWindow(QMainWindow):
         self._start_btn.setEnabled(False)
 
         seed = self._real_manager.get_joint_feedback()
-        if seed is not None:
-            with lock:
-                for i, idx in enumerate(arm_qpos_indices):
-                    data.qpos[idx] = seed[i]
-                fix_base_position(model, data)
-                mujoco.mj_forward(model, data)
+        if seed is None:
+            QMessageBox.warning(
+                self,
+                "实机反馈不可用",
+                "启动实机视图时未读取到当前关节反馈，已拒绝使用仿真初始位姿。",
+            )
+            self._start_btn.setEnabled(True)
+            return
+        with lock:
+            for i, idx in enumerate(arm_qpos_indices):
+                data.qpos[idx] = seed[i]
+            fix_base_position(model, data)
+            mujoco.mj_forward(model, data)
 
         try:
             self._init_mink()
+            self._capture_cartesian_control_origin(caller="start_real")
             cfg_data = self._configuration.data
             self._viewer_ctx = mujoco.viewer.launch_passive(
                 model=self._configuration.model, data=cfg_data,
@@ -2346,6 +2425,11 @@ class CartesianControlWindow(QMainWindow):
 
         self._set_real_connection_state(True, f"已连接: {can_name}")
         self._status_bar.showMessage(f"实机已连接并使能: {can_name}")
+        if self._mode == "real" and self._configuration is not None:
+            if self._sync_real_feedback_to_configuration(
+                caller="connect_real", require=False,
+            ) is not None:
+                self._capture_cartesian_control_origin(caller="connect_real")
 
         # 检测当前关节是否处于零位；若不在零位则询问用户是否平滑回零
         self._prompt_home_after_connect()
@@ -2640,6 +2724,11 @@ class CartesianControlWindow(QMainWindow):
             if self._configuration is None:
                 self._gp_active_check.setChecked(False)
                 return
+            if self._mode == "real" and self._real_manager.is_connected:
+                if self._sync_real_feedback_to_configuration(caller="gamepad_enable") is None:
+                    self._gp_active_check.setChecked(False)
+                    return
+            self._capture_cartesian_control_origin(caller="gamepad_enable")
             # 同步当前夹爪位置，避免手柄激活时夹爪跳变
             self._gamepad_gripper_target = float(
                 self._configuration.data.qpos[gripper_qpos_index]
@@ -2758,21 +2847,24 @@ class CartesianControlWindow(QMainWindow):
         dt = 0.02
         start_q = None
         if self._mode == "real" and self._real_manager.is_connected:
-            start_q = self._real_manager.get_joint_feedback()
+            start_q = self._sync_real_feedback_to_configuration(caller="gamepad")
             if start_q is None:
-                self._status_bar.showMessage("游戏手柄实机反馈不可用，指令未发送")
                 return
-            with lock:
-                for i, idx in enumerate(arm_qpos_indices):
-                    data.qpos[idx] = start_q[i]
-                    self._configuration.data.qpos[idx] = start_q[i]
-                fix_base_position(model, data)
-                fix_base_position(self._configuration.model, self._configuration.data)
-                mujoco.mj_forward(model, data)
-                mujoco.mj_forward(self._configuration.model, self._configuration.data)
 
-        pos = self._get_current_ee_pos()
-        cur_quat = self._get_current_quat()  # [x, y, z, w]
+        if self._cartesian_target_pos is None or self._cartesian_target_rot is None:
+            self._capture_cartesian_control_origin(caller="gamepad_lazy")
+
+        pos = (
+            self._cartesian_target_pos.copy()
+            if self._cartesian_target_pos is not None
+            else self._get_current_ee_pos()
+        )
+        cur_rot = (
+            self._cartesian_target_rot.copy()
+            if self._cartesian_target_rot is not None
+            else self._get_current_rot_matrix()
+        )
+        cur_quat = Rotation.from_matrix(cur_rot).as_quat()  # [x, y, z, w]
 
         target_pos = pos + np.array([vx, vy, vz]) * dt
         # 用角速度构造增量四元数，避免 RPY 万向锁
@@ -2783,7 +2875,7 @@ class CartesianControlWindow(QMainWindow):
             new_quat = Rotation.from_quat(dq) * Rotation.from_quat(cur_quat)
             target_rot = new_quat.as_matrix()
         else:
-            target_rot = self._get_current_rot_matrix()
+            target_rot = cur_rot.copy()
 
         pos_error = np.linalg.norm(target_pos - pos)
         rot_error = angle if angle > 1e-8 else 0.0
@@ -2813,6 +2905,8 @@ class CartesianControlWindow(QMainWindow):
             return  # 手柄静默拒绝，不刷状态栏
 
         self._sync_config_to_global()
+        self._cartesian_target_pos = target_pos.copy()
+        self._cartesian_target_rot = target_rot.copy()
 
         if self._mode == "real" and self._real_manager.is_connected:
             q = self._get_current_joint_angles()
@@ -2862,6 +2956,7 @@ class CartesianControlWindow(QMainWindow):
             self._btn_p_neg, self._btn_p_pos,
             self._btn_yo_neg, self._btn_yo_pos,
             self._btn_home,
+            self._cart_zero_btn,
         ]:
             btn.setEnabled(enabled)
 
@@ -2933,17 +3028,11 @@ class CartesianControlWindow(QMainWindow):
             self._status_bar.showMessage("mink 未初始化")
             return
 
+        start_q = None
         if self._mode == "real" and self._real_manager.is_connected:
-            seed = self._real_manager.get_joint_feedback()
-            if seed is not None:
-                with lock:
-                    for i, idx in enumerate(arm_qpos_indices):
-                        data.qpos[idx] = seed[i]
-                        self._configuration.data.qpos[idx] = seed[i]
-                    fix_base_position(model, data)
-                    fix_base_position(self._configuration.model, self._configuration.data)
-                    mujoco.mj_forward(model, data)
-                    mujoco.mj_forward(self._configuration.model, self._configuration.data)
+            start_q = self._sync_real_feedback_to_configuration(caller=f"move_{axis}")
+            if start_q is None:
+                return
 
         pos = self._get_current_ee_pos()
         rot = self._get_current_rot_matrix()
@@ -2980,11 +3069,13 @@ class CartesianControlWindow(QMainWindow):
             return
 
         self._sync_config_to_global()
+        self._cartesian_target_pos = target_pos.copy()
+        self._cartesian_target_rot = self._get_current_rot_matrix()
 
         if self._mode == "real" and self._real_manager.is_connected:
             q = self._get_current_joint_angles()
             try:
-                self._real_manager.send_joint_command(q)
+                self._real_manager.send_joint_command(q, start_q=start_q)
             except Exception as e:
                 self._status_bar.showMessage(f"实机指令发送失败: {e}")
                 return
@@ -3003,17 +3094,11 @@ class CartesianControlWindow(QMainWindow):
             self._status_bar.showMessage("mink 未初始化")
             return
 
+        start_q = None
         if self._mode == "real" and self._real_manager.is_connected:
-            seed = self._real_manager.get_joint_feedback()
-            if seed is not None:
-                with lock:
-                    for i, idx in enumerate(arm_qpos_indices):
-                        data.qpos[idx] = seed[i]
-                        self._configuration.data.qpos[idx] = seed[i]
-                    fix_base_position(model, data)
-                    fix_base_position(self._configuration.model, self._configuration.data)
-                    mujoco.mj_forward(model, data)
-                    mujoco.mj_forward(self._configuration.model, self._configuration.data)
+            start_q = self._sync_real_feedback_to_configuration(caller=f"rotate_{axis}")
+            if start_q is None:
+                return
 
         pos = self._get_current_ee_pos()
         cur_quat = self._get_current_quat()  # [x, y, z, w]
@@ -3052,11 +3137,13 @@ class CartesianControlWindow(QMainWindow):
             return
 
         self._sync_config_to_global()
+        self._cartesian_target_pos = self._get_current_ee_pos()
+        self._cartesian_target_rot = target_rot.copy()
 
         if self._mode == "real" and self._real_manager.is_connected:
             q = self._get_current_joint_angles()
             try:
-                self._real_manager.send_joint_command(q)
+                self._real_manager.send_joint_command(q, start_q=start_q)
             except Exception as e:
                 self._status_bar.showMessage(f"实机指令发送失败: {e}")
                 return
@@ -3122,6 +3209,7 @@ class CartesianControlWindow(QMainWindow):
 
             self._status_bar.showMessage("已回零")
             self._homing_restore_l3_upper()
+            self._capture_cartesian_control_origin(caller="home_done")
             self._refresh_position()
 
     def _refresh_position(self):
@@ -3357,6 +3445,7 @@ class CartesianControlWindow(QMainWindow):
                 self._joint_move_target_gripper,
                 mark_clean=True,
             )
+            self._capture_cartesian_control_origin(caller="joint_move_done")
 
             self._status_bar.showMessage("关节运动完成")
             self._homing_restore_l3_upper()

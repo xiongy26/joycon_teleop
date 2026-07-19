@@ -49,6 +49,7 @@ from core.ik_core import (
     ARM_JOINT_LIMITS_LOWER,
     ARM_JOINT_LIMITS_UPPER,
     N_ARM,
+    arm_joint_ids,
     arm_qpos_indices,
     arm_dof_indices,
     ee_site_id,
@@ -566,6 +567,7 @@ class CartesianControlWindow(QMainWindow):
         self._joint_target_dirty = [False] * 7
         self._joint_move_step = 0
         self._joint_move_total_steps = 0
+        self._homing_l3_upper_backup = None  # 回零时临时放松 L3 上限的备份
 
         # 示教（零力矩拖动 + 轨迹录制 / 回放）状态
         self._teach_active = False
@@ -962,6 +964,18 @@ class CartesianControlWindow(QMainWindow):
         self._joint_sync_btn.setFixedHeight(30)
         self._joint_sync_btn.clicked.connect(self._joint_sync_to_sim)
         btn_layout.addWidget(self._joint_sync_btn)
+
+        self._gripper_open_btn = QPushButton("夹爪全开")
+        self._gripper_open_btn.setFixedHeight(30)
+        self._gripper_open_btn.setStyleSheet("QPushButton { background-color: #27ae60; color: white; font-weight: bold; }")
+        self._gripper_open_btn.clicked.connect(lambda: self._set_gripper_angle(-90.0))
+        btn_layout.addWidget(self._gripper_open_btn)
+
+        self._gripper_close_btn = QPushButton("夹爪全关")
+        self._gripper_close_btn.setFixedHeight(30)
+        self._gripper_close_btn.setStyleSheet("QPushButton { background-color: #e67e22; color: white; font-weight: bold; }")
+        self._gripper_close_btn.clicked.connect(lambda: self._set_gripper_angle(0.0))
+        btn_layout.addWidget(self._gripper_close_btn)
 
         btn_layout.addWidget(QLabel("运动时长:"))
         self._joint_duration_spin = QDoubleSpinBox()
@@ -2371,10 +2385,13 @@ class CartesianControlWindow(QMainWindow):
     def _home_real_robot_direct(self, start_q: np.ndarray):
         """直接向实机下发一条从当前位姿到零位的平滑回零指令（不依赖 viewer/mink）。"""
         try:
+            self._homing_relax_l3_upper()
             target = np.zeros(N_ARM)
             self._real_manager.send_joint_command(target, start_q=start_q)
+            self._homing_restore_l3_upper()
             self._status_bar.showMessage("已下发回零指令，机器人正在平滑归零...")
         except Exception as e:
+            self._homing_restore_l3_upper()
             self._status_bar.showMessage(f"回零指令下发失败: {e}")
             QMessageBox.warning(self, "回零失败", str(e))
 
@@ -3033,6 +3050,9 @@ class CartesianControlWindow(QMainWindow):
         if self._configuration is None:
             return
 
+        # 回零时临时放松 L3 上限 1 度
+        self._homing_relax_l3_upper()
+
         # 记录当前关节位置，启动插值动画
         self._home_start_q = np.array(
             [self._configuration.data.qpos[idx] for idx in arm_qpos_indices], dtype=float
@@ -3074,6 +3094,7 @@ class CartesianControlWindow(QMainWindow):
                     return
 
             self._status_bar.showMessage("已回零")
+            self._homing_restore_l3_upper()
             self._refresh_position()
 
     def _refresh_position(self):
@@ -3225,12 +3246,14 @@ class CartesianControlWindow(QMainWindow):
         delta_deg = np.degrees(q_target - q_start)
         dirty_axes = [f"L{i + 1}" for i, dirty in enumerate(self._joint_target_dirty[:N_ARM]) if dirty]
         moved_axes = [f"L{i + 1}={delta_deg[i]:+.2f}°" for i in range(N_ARM) if abs(delta_deg[i]) > 0.05]
+        gripper_dirty = "L7" if self._joint_target_dirty[6] else "none"
         log_msg = (
             "[关节控制下发] "
-            f"dirty={dirty_axes or ['none']} "
+            f"dirty={dirty_axes or ['none']}+gripper={gripper_dirty} "
             f"delta={moved_axes or ['none']} "
             f"start={np.array2string(np.degrees(q_start), precision=2, suppress_small=True)}deg "
-            f"target={np.array2string(np.degrees(q_target), precision=2, suppress_small=True)}deg"
+            f"target={np.array2string(np.degrees(q_target), precision=2, suppress_small=True)}deg "
+            f"gripper: start={np.degrees(gripper_start):.1f}° target={np.degrees(gripper_target):.1f}°"
         )
         self._pose_logger.info(log_msg)
         print(log_msg, flush=True)
@@ -3309,12 +3332,16 @@ class CartesianControlWindow(QMainWindow):
             )
 
             self._status_bar.showMessage("关节运动完成")
+            self._homing_restore_l3_upper()
             self._refresh_position()
 
     def _joint_go_zero(self):
         if self._viewer is None or not self._viewer.is_running():
             self._status_bar.showMessage("请先启动视图")
             return
+
+        # 回零时临时放松 L3 上限 1 度，避免浮点精度导致限位拒绝
+        self._homing_relax_l3_upper()
 
         self._joint_updating = True
         for i in range(7):
@@ -3326,6 +3353,36 @@ class CartesianControlWindow(QMainWindow):
         self._joint_target_dirty = [True] * 7
 
         self._joint_send_command()
+
+    def _homing_relax_l3_upper(self):
+        """回零时临时放松 L3 上限 1 度（约 0.01745 rad），避免限位拒绝。"""
+        l3_tolerance = np.radians(1.0)
+        # 放松 mink 配置限位（jnt_range 用 joint ID 索引）
+        if self._configuration is not None:
+            l3_jid = arm_joint_ids[2]
+            self._homing_l3_upper_backup = float(
+                self._configuration.model.jnt_range[l3_jid, 1]
+            )
+            self._configuration.model.jnt_range[l3_jid, 1] += l3_tolerance
+        # 放松实机控制器限位
+        if self._real_manager.is_connected and self._real_manager._controller is not None:
+            ctrl = self._real_manager._controller
+            if self._homing_l3_upper_backup is None:
+                self._homing_l3_upper_backup = float(ctrl._upper_limits[2])
+            ctrl._upper_limits[2] += l3_tolerance
+
+    def _homing_restore_l3_upper(self):
+        """恢复 L3 上限位。"""
+        if self._homing_l3_upper_backup is None:
+            return
+        # 恢复 mink 配置限位
+        if self._configuration is not None:
+            l3_jid = arm_joint_ids[2]
+            self._configuration.model.jnt_range[l3_jid, 1] = self._homing_l3_upper_backup
+        # 恢复实机控制器限位
+        if self._real_manager.is_connected and self._real_manager._controller is not None:
+            self._real_manager._controller._upper_limits[2] = self._homing_l3_upper_backup
+        self._homing_l3_upper_backup = None
 
     def _joint_sync_to_sim(self):
         """Sync sliders/spinboxes to current simulation or real feedback angles."""
@@ -3349,6 +3406,13 @@ class CartesianControlWindow(QMainWindow):
             float(self._configuration.q[gripper_qpos_index]),
         )
         self._status_bar.showMessage("已同步仿真当前关节角度")
+
+    def _set_gripper_angle(self, angle_deg: float):
+        """Set gripper to specified angle (degrees) and update slider/spinbox."""
+        idx = 6  # Gripper is joint 7 (index 6)
+        if idx < len(self._joint_spinboxes):
+            self._joint_spinboxes[idx].setValue(angle_deg)
+        self._status_bar.showMessage(f"夹爪目标: {angle_deg:.1f}°")
 
     def _update_joint_feedback(self):
         """Update joint feedback labels from sim or real robot."""

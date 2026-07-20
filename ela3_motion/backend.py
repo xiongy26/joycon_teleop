@@ -74,17 +74,24 @@ class ELA3Backend:
         self.enable()
         self.start_control_loop()
 
-    def read_arm_joints(self) -> Optional[np.ndarray]:
+    def read_joint_positions(self, *, include_gripper: bool = False) -> Optional[np.ndarray]:
         try:
             joints = self._arm.GetArmJointMsgs()
             if joints is None or joints.timestamp <= 0:
                 return None
-            values = np.array(joints.to_list(include_gripper=False)[:N_ARM], dtype=float)
+            expected = N_ARM + int(include_gripper)
+            values = np.array(
+                joints.to_list(include_gripper=include_gripper)[:expected],
+                dtype=float,
+            )
         except Exception:
             return None
-        if len(values) != N_ARM or np.any(~np.isfinite(values)):
+        if len(values) != expected or np.any(~np.isfinite(values)):
             return None
         return values
+
+    def read_arm_joints(self) -> Optional[np.ndarray]:
+        return self.read_joint_positions(include_gripper=False)
 
     def wait_arm_joints(self, timeout_s: float) -> np.ndarray:
         deadline = time.time() + max(0.1, float(timeout_s))

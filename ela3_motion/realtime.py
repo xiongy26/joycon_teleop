@@ -110,6 +110,17 @@ class ELA3RealtimeController:
             return None
         return self._backend.read_arm_joints()
 
+    def read_joint_positions(self, *, include_gripper: bool = False) -> Optional[np.ndarray]:
+        if self._backend is None:
+            return None
+        reader = getattr(self._backend, "read_joint_positions", None)
+        if reader is None:
+            values = self._backend.read_arm_joints()
+            if include_gripper and values is not None:
+                return None
+            return values
+        return reader(include_gripper=include_gripper)
+
     def submit_gripper_target(self, gripper_angle: float) -> bool:
         """下发夹爪目标角度（弧度）。控制循环运行时会异步生效。"""
         if self._backend is None or self._backend.arm is None:

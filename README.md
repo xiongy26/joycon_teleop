@@ -71,6 +71,114 @@ sudo ./el_a3_sdk/scripts/setup_can.sh can0 1000000
 2. 在 GUI 中选择 "Real" 模式，配置 CAN 接口和 Kp/Kd 参数
 3. 点击 "Start Viewer" 连接真机
 
+## ACT 数据采集
+
+项目提供了标准 ACT/ALOHA 风格的 HDF5 episode 采集工具，可在零力矩拖动示教时同步保存相机图像和关节状态。
+
+额外依赖：
+
+```bash
+pip install h5py opencv-python
+```
+
+采集一个 episode：
+
+```bash
+python scripts/collect_act_episode.py \
+  --task-name pick_cube \
+  --camera cam_high=0:640x480 \
+  --camera cam_wrist=2:640x480 \
+  --rate 30 \
+  --output-dir data/act
+```
+
+默认流程：
+
+1. 打开相机并连接真机
+2. 使能机械臂并进入零力矩重力补偿示教模式
+3. 按 Enter 开始录制
+4. 拖动机械臂完成示教
+5. 按 Ctrl+C 结束录制并保存 HDF5 文件
+
+如果需要固定录制时长：
+
+```bash
+python scripts/collect_act_episode.py \
+  --task-name pick_cube \
+  --camera cam_high=0:640x480 \
+  --duration 10
+```
+
+检查采集文件：
+
+```bash
+python scripts/inspect_act_dataset.py data/act/episode_pick_cube_000000.hdf5
+```
+
+HDF5 数据结构：
+
+```text
+observations/qpos              float32 [T, 7]
+observations/qvel              float32 [T, 7]
+observations/images/<camera>   uint8   [T, H, W, 3] RGB
+timestamps                     float64 [T]
+action                         float32 [T, 7]
+```
+
+当前 `action[t]` 定义为下一帧 `qpos` 目标，最后一帧 action 复制最后一帧 `qpos`。这适合先打通 ACT 的 chunked action 训练流程；后续如果改为记录遥操作命令或夹爪离散动作，可以在 `act_data/episode_writer.py` 中替换 action 生成逻辑。
+
+训练一个 ACT-style 策略：
+
+```bash
+python scripts/train_act_policy.py \
+  --dataset data/act \
+  --cameras cam_high,cam_wrist \
+  --chunk-size 50 \
+  --batch-size 8 \
+  --epochs 100 \
+  --device cuda \
+  --output-dir checkpoints/pick_cube_act
+```
+
+如果机器没有 CUDA，使用 `--device cpu`。训练脚本会保存：
+
+```text
+checkpoints/pick_cube_act/train_config.json
+checkpoints/pick_cube_act/policy_best.pt
+checkpoints/pick_cube_act/policy_epoch_*.pt
+```
+
+部署训练好的策略到真机：
+
+```bash
+python scripts/run_act_policy.py \
+  --checkpoint checkpoints/pick_cube_act/policy_best.pt \
+  --camera cam_high=0:640x480 \
+  --camera cam_wrist=2:640x480 \
+  --rate 10 \
+  --query-interval 10 \
+  --max-target-delta 0.08 \
+  --max-joint-velocity 0.6
+```
+
+部署脚本会实时读取相机和关节状态，策略输出 action chunk 后逐步发送关节目标。每个关节目标会先按 `--max-target-delta` 限制单步变化，再裁剪到默认关节限位内。默认每步阻塞执行，避免异步命令堆积；只有明确需要时才使用 `--nonblocking`。建议首次上真机时降低 `--rate`、`--max-target-delta` 和 `--max-joint-velocity`，并随时准备急停。
+
+仅验证模型加载、相机读取和动作生成流程时，可以加 `--dry-run`，但脚本仍需要连接机械臂读取当前关节反馈。
+
+部署前安全检查：
+
+```bash
+python scripts/preflight_act_policy.py \
+  --checkpoint checkpoints/pick_cube_act/policy_best.pt \
+  --camera cam_high=0:640x480 \
+  --camera cam_wrist=2:640x480 \
+  --rate 10 \
+  --max-target-delta 0.08 \
+  --max-joint-velocity 0.6
+```
+
+这个脚本只做检查，不执行策略动作。它会验证 checkpoint、相机帧、关节反馈、单次策略推理，以及首个动作是否能通过实时控制层的 dry-run 安全约束。只想在开发机上检查 checkpoint 结构时，可以用 `--skip-cameras --skip-robot`。
+
 ## Joy-Con (L) 按键说明
 
 ```

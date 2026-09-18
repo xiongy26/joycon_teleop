@@ -41,8 +41,8 @@ def _run(cmd: list[str], log_path: Path | None = None) -> None:
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--out-dir", default=None, help="Pipeline output directory")
-    parser.add_argument("--episodes", type=int, default=24, help="Demonstrations to collect")
-    parser.add_argument("--epochs", type=int, default=80)
+    parser.add_argument("--episodes", type=int, default=80, help="Demonstrations to collect")
+    parser.add_argument("--epochs", type=int, default=150)
     parser.add_argument("--chunk-size", type=int, default=20)
     parser.add_argument("--batch-size", type=int, default=32)
     parser.add_argument("--image-size", type=int, default=128)

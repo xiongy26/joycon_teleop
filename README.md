@@ -179,6 +179,38 @@ python scripts/preflight_act_policy.py \
 
 这个脚本只做检查，不执行策略动作。它会验证 checkpoint、相机帧、关节反馈、单次策略推理，以及首个动作是否能通过实时控制层的 dry-run 安全约束。只想在开发机上检查 checkpoint 结构时，可以用 `--skip-cameras --skip-robot`。
 
+## ACT 仿真验证（MuJoCo，自动采集 + 自动训练）
+
+`act_sim/` 提供 EL-A3 的 MuJoCo 仿真任务（桌面 + 红色方块 + cam_high/cam_wrist 两个任务相机），用于在上真机前验证整条 ACT 管线：脚本化 IK 专家自动生成演示数据（无需人工示教），复用与真机完全相同的 HDF5 格式、训练脚本，然后在 MuJoCo 里做闭环 rollout 评估，输出成功率报告。
+
+一键运行（采集 → 数据检查 → 训练 → 闭环评估 → 报告）：
+
+```bash
+python scripts/run_act_sim_pipeline.py                       # 默认 24 条演示、80 epochs、12 次评估
+python scripts/run_act_sim_pipeline.py --quick               # 冒烟配置（3 条演示、3 epochs）
+python scripts/run_act_sim_pipeline.py --skip-collect --skip-train   # 只评估已有 checkpoint
+```
+
+产物在 `runs/act_sim_<时间戳>/` 下：`data/`（HDF5 演示）、`ckpt/policy_best.pt`、`eval/eval_results.json`、`report.md`（成功率表格）与 `eval/rollout_*.mp4`（俯视+腕部并排回放视频）。
+
+单独使用各模块：
+
+```bash
+python -m act_sim.collect --episodes 24 --output-dir data/act_sim   # 只自动采集
+python -m act_sim.evaluate runs/act_sim_xxx/ckpt/policy_best.pt --output-dir runs/act_sim_xxx/eval  # 只评估
+```
+
+### 浏览器查看器（MuJoCo WebAssembly）
+
+仿真结果可以在浏览器里直接看：查看器用官方 `mujoco-js`（MuJoCo 编译为 WebAssembly）+ three.js 渲染，无需任何插件。
+
+```bash
+python scripts/serve_act_sim_viewer.py        # 自动导出最新 run 数据并启动本地服务
+# 打开 http://127.0.0.1:8010/web/viewer.html
+```
+
+查看器支持三种模式：**交互仿真**（暂停/归位、拖滑块控制 7 个关节指令、移动方块、切换自由/cam_high/cam_wrist 视角、显示接触点）、**演示回放**（回放自动采集的 HDF5 演示，可拖时间轴）、**策略回放**（回放训练后策略的闭环评估轨迹，显示每步 tip-cube 距离）。相机画面与训练时离屏渲染使用同一模型定义。
+
 ## Joy-Con (L) 按键说明
 
 ```

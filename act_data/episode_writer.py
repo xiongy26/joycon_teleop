@@ -27,6 +27,7 @@ class EpisodeMetadata:
     robot: str = "EL-A3"
     sim: bool = False
     action_semantics: str = "next qpos target; final action duplicates final qpos"
+    cube_start: Optional[list] = None
 
 
 class ACTEpisodeWriter:
@@ -95,7 +96,7 @@ class ACTEpisodeWriter:
             dtype="f8",
         )
 
-    def append(self, *, qpos: np.ndarray, images: Dict[str, np.ndarray]) -> None:
+    def append(self, *, qpos: np.ndarray, images: Dict[str, np.ndarray], timestamp: Optional[float] = None) -> None:
         if self._h5 is None or self._qpos_ds is None or self._timestamps_ds is None:
             raise RuntimeError("episode writer is not open")
 
@@ -114,14 +115,18 @@ class ACTEpisodeWriter:
             )
 
         idx = self._count
-        if self._t0 is None:
+        if timestamp is not None:
+            stamp = float(timestamp)
+        elif self._t0 is None:
+            stamp = 0.0
             self._t0 = time.perf_counter()
-        timestamp = time.perf_counter() - self._t0
+        else:
+            stamp = time.perf_counter() - self._t0
 
         self._qpos_ds.resize((idx + 1, self.metadata.qpos_dim))
         self._qpos_ds[idx] = qpos
         self._timestamps_ds.resize((idx + 1,))
-        self._timestamps_ds[idx] = timestamp
+        self._timestamps_ds[idx] = stamp
 
         image_group = self._h5["observations"]["images"]
         for name, image in images.items():

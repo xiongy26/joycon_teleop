@@ -1,0 +1,103 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8" />
+  <title>EL-A3 ACT 仿真查看器 (MuJoCo WASM)</title>
+  <style>
+    :root { color-scheme: dark; }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0; display: flex; height: 100vh; overflow: hidden;
+      font: 13px/1.5 "PingFang SC", "Microsoft YaHei", system-ui, sans-serif;
+      background: #0b0e13; color: #cfd8e3;
+    }
+    #panel {
+      width: 300px; min-width: 300px; overflow-y: auto; padding: 14px;
+      background: #12161d; border-right: 1px solid #232a35;
+    }
+    h1 { font-size: 15px; margin: 0 0 4px; color: #fff; }
+    h2 { font-size: 12px; margin: 18px 0 6px; color: #8fa3bd; text-transform: uppercase; letter-spacing: .08em; }
+    #status { font-size: 12px; color: #7fe08f; min-height: 18px; }
+    #hud { font-size: 12px; color: #ffd479; margin-top: 6px; word-break: break-all; }
+    #hud-extra { font-size: 12px; color: #79c7ff; margin-top: 2px; }
+    button {
+      background: #1d2530; color: #cfd8e3; border: 1px solid #2c3644;
+      border-radius: 6px; padding: 5px 10px; cursor: pointer; margin: 2px 4px 2px 0;
+    }
+    button:hover:not(:disabled) { background: #26303e; }
+    button.active { background: #2b5bab; border-color: #3d74c8; color: #fff; }
+    button:disabled { opacity: .45; cursor: default; }
+    select, input[type=range] { width: 100%; }
+    select { background: #1d2530; color: #cfd8e3; border: 1px solid #2c3644; border-radius: 6px; padding: 4px; }
+    .row { margin: 8px 0; }
+    .slider-row { display: grid; grid-template-columns: 34px 1fr 44px; gap: 6px; align-items: center; margin: 3px 0; }
+    .slider-row label { font-size: 11px; color: #8fa3bd; }
+    .slider-val { font-size: 11px; color: #8fa3bd; text-align: right; }
+    .mode-panel { display: none; }
+    .btnrow { display: flex; flex-wrap: wrap; }
+    #canvas-wrap { flex: 1; position: relative; min-width: 0; }
+    #canvas-wrap canvas { display: block; }
+    .hint { font-size: 11px; color: #66788f; }
+    a { color: #79c7ff; }
+  </style>
+</head>
+<body>
+  <div id="panel">
+    <h1>EL-A3 ACT 仿真查看器</h1>
+    <div>MuJoCo 物理引擎 (WebAssembly) + three.js</div>
+    <div id="status">加载中 …</div>
+    <div id="hud"></div>
+    <div id="hud-extra"></div>
+
+    <h2>视角</h2>
+    <div class="btnrow">
+      <button data-view="free" class="active" disabled>自由</button>
+      <button data-view="cam_high" disabled>cam_high</button>
+      <button data-view="cam_wrist" disabled>cam_wrist</button>
+    </div>
+    <div class="hint">自由视角：左键旋转 / 右键或 Shift 平移 / 滚轮缩放</div>
+
+    <h2>模式</h2>
+    <div class="btnrow">
+      <button data-mode="interactive" class="active" disabled>交互仿真</button>
+      <button data-mode="episode" disabled>演示回放</button>
+      <button data-mode="rollout" disabled>策略回放</button>
+    </div>
+
+    <div class="mode-panel" data-mode-panel="interactive">
+      <div class="btnrow">
+        <button id="btn-pause" disabled>暂停</button>
+        <button id="btn-home" disabled>机械臂归位</button>
+        <button id="btn-contacts" disabled>显示接触点</button>
+      </div>
+      <h2>方块位置</h2>
+      <div class="slider-row"><label>x</label><input id="cube-x" type="range" min="-0.10" max="0.10" step="0.005" value="0.0" disabled><span class="slider-val">0.00</span></div>
+      <div class="slider-row"><label>y</label><input id="cube-y" type="range" min="-0.42" max="-0.26" step="0.005" value="-0.35" disabled><span class="slider-val">-0.35</span></div>
+      <h2>关节指令 (ctrl)</h2>
+      <div id="joint-sliders"></div>
+    </div>
+
+    <div class="mode-panel" data-mode-panel="episode">
+      <div class="row">
+        <select id="episode-select" disabled></select>
+        <button id="ep-select-btn" disabled>加载该演示</button>
+        <button id="ep-play" disabled>播放</button>
+      </div>
+      <div class="row"><input id="ep-timeline" type="range" min="0" max="49" value="0" disabled></div>
+      <div class="hint">回放自动采集的 IK 专家演示（HDF5 → JSON）。命令 ctrl = action[t]（下一时刻 qpos）。</div>
+    </div>
+
+    <div class="mode-panel" data-mode-panel="rollout">
+      <div class="row">
+        <select id="rollout-select" disabled></select>
+        <button id="ro-select-btn" disabled>加载该 rollout</button>
+        <button id="ro-play" disabled>播放</button>
+      </div>
+      <div class="row"><input id="ro-timeline" type="range" min="0" max="129" value="0" disabled></div>
+      <div class="hint">回放训练后 ACT 策略的闭环评估轨迹（每 10 步查询一次策略，执行动作 chunk）。</div>
+    </div>
+  </div>
+  <div id="canvas-wrap"></div>
+  <script type="module" src="./viewer.js"></script>
+</body>
+</html>

@@ -7,7 +7,12 @@ from torch import nn
 
 
 class ImageEncoder(nn.Module):
-    """Small CNN encoder shared across camera views."""
+    """Small CNN encoder shared across camera views.
+
+    Keeps a 4x4 spatial feature map instead of global average pooling so the
+    policy can localize objects in the image; average pooling collapses all
+    spatial information and caps end-effector precision.
+    """
 
     def __init__(self, out_dim: int):
         super().__init__()
@@ -24,9 +29,9 @@ class ImageEncoder(nn.Module):
             nn.Conv2d(128, 256, kernel_size=3, stride=2, padding=1),
             nn.GroupNorm(16, 256),
             nn.ReLU(inplace=True),
-            nn.AdaptiveAvgPool2d((1, 1)),
+            nn.AdaptiveAvgPool2d((4, 4)),
             nn.Flatten(),
-            nn.Linear(256, out_dim),
+            nn.Linear(256 * 4 * 4, out_dim),
             nn.LayerNorm(out_dim),
         )
 

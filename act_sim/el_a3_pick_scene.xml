@@ -1,7 +1,14 @@
 <mujoco model="el_a3_act_sim_reach">
   <!-- EL-A3 reach-validation scene for the ACT pipeline.
        Derived from robot/el_a3_description/urdf/scene_gripper.xml:
-       gravity enabled, mocap target removed, adds table + cube + task cameras. -->
+       gravity enabled, mocap target removed, adds table + cube + task cameras.
+       Gripper swapped (2026-11-11, MERO-195): old fixed jaw mesh replaced by the
+       yam movable two-finger gripper (same subtree as scene_gripper.xml, user
+       confirmed open direction: finger_left axis 0 -1 0 / finger_right axis 0 1 0),
+       equality-coupled to L7 (L7=0 closed, L7=-90 deg fully open, 47 mm per finger).
+       gripper_tip_site stays at L6 z=-0.194, identical to the fixed-jaw version, so
+       HOME_QPOS / IK reachability / task metrics are unchanged. The RGB axis geoms
+       from scene_gripper.xml are intentionally omitted to keep the task cameras clean. -->
   <compiler angle="radian" meshdir="../robot/el_a3_description/meshes"/>
 
   <statistic center="0 -0.3 0.2" extent="0.6"/>
@@ -26,7 +33,11 @@
     <mesh name="l5" file="l5.stl"/>
     <mesh name="l6" file="l6.stl"/>
     <mesh name="el05_l6" file="el05_l6.stl"/>
-    <mesh name="jaw" file="jaw.stl"/>
+    <!-- yam 可动双指 + 滑轨安装板（来自 yam_arm_mujoco_standalone 的 gripper.stl，
+         已切除电机圆筒段，仅保留 z∈[45,63.5]mm 滑轨板；坐标已烘焙到 mount 系） -->
+    <mesh name="yam_gripper_rail" file="yam_gripper_rail.stl"/>
+    <mesh name="yam_tip_left" file="../../../yam_arm_mujoco_standalone/yam_arm_standalone/yam/assets/tip_left.stl"/>
+    <mesh name="yam_tip_right" file="../../../yam_arm_mujoco_standalone/yam_arm_standalone/yam/assets/tip_right.stl"/>
   </asset>
 
   <worldbody>
@@ -75,13 +86,36 @@
                 <joint name="L6_joint" pos="0 0 0" axis="0 0 1" range="-0.79 0.79" actuatorfrcrange="-6 6" damping="0.05" frictionloss="0.05"/>
                 <geom name="el05_l6_visual" pos="0 0 -0.0755" quat="1.32679e-06 1 0 0" type="mesh" contype="0" conaffinity="0"
                   rgba="0.301961 0.290196 0.262745 1" mesh="el05_l6"/>
-                <geom name="jaw_visual" pos="0 0 -0.0755" quat="1.32679e-06 1 0 0" type="mesh" contype="0" conaffinity="0"
-                  rgba="0.972549 0.529412 0.00392157 1" mesh="jaw"/>
 
+                <!-- yam 可动双指：与 scene_gripper.xml 完全同一子树（用户确认的开合方向终版）。
+                     双指滑动关节经 <equality> 与 L7 耦合：
+                     L7 = 0° → 指尖并拢；L7 = -90° → 全开（每指行程 46.95 mm）。
+                     指尖可碰撞（与方块/桌面/地面），互不碰撞；ACT 任务保持 reach 语义，
+                     演示中 L7 恒为 0（并拢姿态），动作维度与旧版一致。
+                     mount z=-0.053：手指根部贴住法兰面，滑轨板背面嵌入腕口 8mm；
+                     gripper_tip_site(mount z=+0.141) = L6 z=-0.194，与旧固定 jaw 版分毫不差。 -->
+                <body name="yam_gripper_mount" pos="0 0 -0.053" quat="0 1 0 0">
+                  <inertial pos="0 0 0.06" mass="0.05" diaginertia="0.0001 0.0001 0.0001"/>
+                  <geom name="yam_gripper_rail" type="mesh" mesh="yam_gripper_rail" rgba="0.72 0.72 0.75 1" contype="0" conaffinity="0"/>
+                  <body name="finger_left" pos="0.0445119 -0.0239931 0.0566829" quat="0 0.70711 0.70711 0">
+                    <inertial mass="0.07" pos="0.014 -0.042 -0.022" diaginertia="5e-05 5e-05 5e-05"/>
+                    <joint name="finger_left_joint" type="slide" axis="0 -1 0" range="0 0.04695" damping="0.2" frictionloss="0.05"/>
+                    <geom name="finger_left_visual" pos="0.00999321 -0.0914614 0.129783" type="mesh" mesh="yam_tip_left"
+                      rgba="0.6 0.79 0.92 1" contype="2" conaffinity="5" friction="1.0 0.02 0.001"/>
+                  </body>
+                  <body name="finger_right" pos="-0.0445119 0.0239931 0.0566829" quat="0 0.70711 0.70711 0">
+                    <inertial mass="0.07" pos="-0.014 0.042 -0.022" diaginertia="5e-05 5e-05 5e-05"/>
+                    <joint name="finger_right_joint" type="slide" axis="0 1 0" range="0 0.04695" damping="0.2" frictionloss="0.05"/>
+                    <geom name="finger_right_visual" pos="-0.0379932 -0.00133753 0.129783" type="mesh" mesh="yam_tip_right"
+                      rgba="0.6 0.79 0.92 1" contype="2" conaffinity="5" friction="1.0 0.02 0.001"/>
+                  </body>
+                  <site name="gripper_tip_site" pos="0 0 0.141" size="0.005" rgba="0 1 0 1" type="sphere"/>
+                </body>
+
+                <!-- L7 载体：空 body，仅作为夹爪电机的仿真通道（与实机 7 号电机对应） -->
                 <body name="gripper_link" pos="0 0 -0.074">
                   <inertial pos="0 0 0" mass="0.05" diaginertia="0.0001 0.0001 0.0001"/>
                   <joint name="L7_joint" pos="0 0 0" axis="0 0 1" range="-1.5708 1.5708" actuatorfrcrange="-6 6" damping="0.05" frictionloss="0.05"/>
-                  <site name="gripper_tip_site" pos="0 0 -0.12" size="0.005" rgba="0 1 0 1" type="sphere"/>
                   <camera name="cam_wrist" pos="0 0 -0.03" xyaxes="1 0 0 0 1 0" fovy="70"/>
                 </body>
               </body>
@@ -98,6 +132,20 @@
     <framepos name="gripper_tip_site_pos" objtype="site" objname="gripper_tip_site"/>
     <framequat name="gripper_tip_site_quat" objtype="site" objname="gripper_tip_site"/>
   </sensor>
+
+  <equality>
+    <!-- 双指开合 = f(L7): q = -0.0299 * L7
+         L7=-90° → q=47mm（全开）, L7=0° → q=0（指尖并拢）, L7&gt;0 → 保持并拢并施加夹紧力
+         本场景开启重力（GUI 场景为 gravity=disable），默认 solref/solimp 下耦合约束
+         过软：重力负载的臂部构型会让 finger_left 卡在下限不动（47mm 违位只产生
+         0.2N 修正力）。这里把两条耦合都收紧（solref 0.002s + 高阻抗 solimp），
+         实测重力开/关两种状态下双指都能精确跟踪 L7（全开 46.96/46.97mm，
+         并拢 ±0.01mm）。运动映射与 scene_gripper.xml 完全一致。 -->
+    <joint name="finger_L_couple" joint1="finger_left_joint" joint2="L7_joint" polycoef="0 -0.0299 0 0"
+      solref="0.002 1" solimp="0.999 0.9999 0.00001 0.5 2"/>
+    <joint name="finger_R_couple" joint1="finger_right_joint" joint2="L7_joint" polycoef="0 -0.0299 0 0"
+      solref="0.002 1" solimp="0.999 0.9999 0.00001 0.5 2"/>
+  </equality>
 
   <actuator>
     <position name="L1" joint="L1_joint" kp="100" ctrlrange="-2.79253 2.79253" forcerange="-14 14"/>

@@ -181,7 +181,7 @@ python scripts/preflight_act_policy.py \
 
 ## ACT 仿真验证（MuJoCo，自动采集 + 自动训练）
 
-`act_sim/` 提供 EL-A3 的 MuJoCo 仿真任务（桌面 + 红色方块 + cam_high/cam_wrist 两个任务相机），用于在上真机前验证整条 ACT 管线：脚本化 IK 专家自动生成演示数据（无需人工示教），复用与真机完全相同的 HDF5 格式、训练脚本，然后在 MuJoCo 里做闭环 rollout 评估，输出成功率报告。
+`act_sim/` 提供 EL-A3 的 MuJoCo 仿真任务（桌面 + 红色方块 + cam_high/cam_wrist 两个任务相机），用于在上真机前验证整条 ACT 管线：脚本化 IK 专家自动生成演示数据（无需人工示教），复用与真机完全相同的 HDF5 格式、训练脚本，然后在 MuJoCo 里做闭环 rollout 评估，输出成功率报告。末端已换成 yam 可动双指夹爪（与 `robot/el_a3_description/urdf/scene_gripper.xml` 同款，L7 耦合开合；任务仍为 reach 语义，动作维度 7 维不变）；旧场景数据在结构上兼容，但画面变了，换场景后需重新采集训练（2026-11-11 实测：80 条演示/150 epochs，闭环评估 12/12 成功）。
 
 一键运行（采集 → 数据检查 → 训练 → 闭环评估 → 报告）：
 

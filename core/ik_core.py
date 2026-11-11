@@ -96,6 +96,31 @@ ARM_JOINT_LIMITS_UPPER = np.minimum(
 
 lock = threading.Lock()
 
+# yam 可动夹爪双指滑动关节及其与 L7(夹爪通道)的耦合系数：
+#   q_finger = c0 + c1 * q_L7   （与 scene_gripper.xml 的 <equality> 完全一致）
+FINGER_JOINT_NAMES = ("finger_left_joint", "finger_right_joint")
+FINGER_COUPLE_COEF = (0.0, -0.0299)
+
+
+def sync_gripper_fingers(model_arg=None, data_arg=None):
+    """GUI 走纯运动学（直接写 qpos + mj_forward，不 mj_step），
+    equality 约束不会经过求解器，双指需在此手动跟随 L7。"""
+    mdl = model_arg if model_arg is not None else model
+    dat = data_arg if data_arg is not None else data
+    try:
+        l7_id = mujoco.mj_name2id(mdl, mujoco.mjtObj.mjOBJ_JOINT, GRIPPER_JOINT_NAME)
+        if l7_id < 0:
+            return
+        l7_q = dat.qpos[mdl.jnt_qposadr[l7_id]]
+        c0, c1 = FINGER_COUPLE_COEF
+        for n in FINGER_JOINT_NAMES:
+            fid = mujoco.mj_name2id(mdl, mujoco.mjtObj.mjOBJ_JOINT, n)
+            if fid >= 0:
+                adr = mdl.jnt_qposadr[fid]
+                dat.qpos[adr] = float(np.clip(c0 + c1 * l7_q, *mdl.jnt_range[fid]))
+    except Exception:
+        pass
+
 
 def fix_base_position(model_arg=None, data_arg=None):
     """Fix base position to prevent falling through floor."""
@@ -123,6 +148,8 @@ def fix_base_position(model_arg=None, data_arg=None):
             dat.qvel[dof_adr:dof_adr + 6] = 0.0
     except Exception:
         pass
+    # 双指开合跟随夹爪通道（无 finger 关节的模型自动跳过）
+    sync_gripper_fingers(mdl, dat)
 
 
 def rotation_matrix_to_quat(R):

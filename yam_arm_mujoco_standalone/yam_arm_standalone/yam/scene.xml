@@ -1,0 +1,53 @@
+<mujoco model="yam_standalone_scene">
+  <!-- Minimal standalone scene: floor + light + the UNMODIFIED YAM arm
+       (included from yam_full.xml) + two physics-enablement tweaks that the
+       objectslam demo never needed because it played the arm back
+       kinematically (data.qpos written directly, physics never stepped):
+
+       1. exclude base/link1 collision: their meshes overlap at qpos0 (mount
+          interface), which physically locks joint1. Left in, the arm cannot
+          move at all. If you include yam_full.xml into your own scene, copy
+          this exclude.
+       2. keyframe "home_open": qpos0 leaves the two fingertips interpenetrating
+          (empirically they overlap for joint7/8 in about [-0.030, +0.023]),
+          and contact then jams the slide joints at ~-0.031, unrecoverable by
+          ctrl alone. Reset to this keyframe (jaws fully open) to start clean.
+
+       3. joint damping via the default class below: the upstream model has
+          zero joint damping and kp-only position actuators (calibrated for
+          the real robot); stepped in physics it never dissipates energy and
+          keeps swinging. The default section MUST come before the include —
+          included elements inherit the defaults in effect at their position
+          in the document.
+
+       The arm's base body stays at the origin (its frame is the mounting
+       face); the floor sits at z=-0.1 so nothing collides at the home pose.
+       For a table-top setup, change the base body pos in yam_full.xml (in
+       the objectslam-demo the arm was mounted at pos='0.285 -0.593 0.720'
+       euler='0 0 -2.406' on a 0.72 m table). -->
+  <option timestep="0.002" gravity="0 0 -9.81" integrator="implicitfast"/>
+  <visual>
+    <headlight ambient="0.4 0.4 0.4" diffuse="0.3 0.3 0.3"/>
+  </visual>
+
+  <default>
+    <joint damping="1.0"/>
+  </default>
+
+  <include file="yam_full.xml"/>
+
+  <contact>
+    <exclude body1="base" body2="link1"/>
+  </contact>
+
+  <keyframe>
+    <key name="home_open" qpos="0 0 0 0 0 0 0.0469 0.0469"/>
+  </keyframe>
+
+  <worldbody>
+    <geom name="floor" type="plane" pos="0 0 -0.1" size="2 2 0.1"
+          rgba="0.85 0.85 0.85 1"/>
+    <light pos="1 1 2.5" dir="-0.3 -0.3 -1" directional="true"
+           diffuse="0.8 0.8 0.8"/>
+  </worldbody>
+</mujoco>

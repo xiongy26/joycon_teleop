@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import sys
 import time
+import json
 from pathlib import Path
 
 import numpy as np
@@ -14,7 +15,7 @@ if str(PROJECT_ROOT) not in sys.path:
 
 from act_data.episode_writer import ACTEpisodeWriter, EpisodeMetadata
 from act_sim.env import CAMERA_NAMES, ELA3ReachEnv, sample_cube_position
-from act_sim.expert import ReachExpert
+from act_sim.agent import GPTPolicySimAgent
 
 
 def _next_episode_path(output_dir: Path, task_name: str) -> tuple[int, Path]:
@@ -42,10 +43,12 @@ def collect_dataset(
     qpos_noise: float = 0.008,
     verbose: bool = True,
 ) -> list[Path]:
-    """Collect ``num_episodes`` scripted demonstrations into ACT HDF5 episodes.
+    """Collect varied, closed-loop demonstrations into ACT HDF5 episodes.
 
     Each episode: arm settles at HOME with small joint noise, then the IK
-    expert opens the gripper, approaches the cube, closes it, and lifts it.
+    teacher observes the simulation state, emits structured move/gripper
+    decisions, and executes the checked qpos targets.  The teacher adds bounded
+    timing and waypoint variation so ACT does not learn one identical path.
     Recorded qpos is the measured joint state; ``object_qpos`` stores the cube
     trajectory so browser replays show the grasp.
     """
@@ -58,8 +61,8 @@ def collect_dataset(
         raise ValueError("image_size must be positive")
 
     env = ELA3ReachEnv(image_size=image_size, control_hz=control_hz)
-    expert = ReachExpert(env, rate_hz=control_hz)
     output_dir = Path(output_dir)
+    trace_path = output_dir / "agent_trace.jsonl"
 
     paths: list[Path] = []
     try:
@@ -67,6 +70,7 @@ def collect_dataset(
             rng = np.random.default_rng(seed + episode)
             cube = sample_cube_position(rng)
             env.reset(cube_pos=cube, qpos_noise=qpos_noise, rng=rng)
+            agent = GPTPolicySimAgent(env, rate_hz=control_hz, rng=rng)
 
             episode_id, output_path = _next_episode_path(output_dir, task_name)
             metadata = EpisodeMetadata(
@@ -77,13 +81,27 @@ def collect_dataset(
                 qpos_dim=7,
                 action_dim=7,
                 sim=True,
-                action_semantics="next measured qpos; scripted open-close-lift IK expert in MuJoCo",
+                action_semantics="next measured qpos; closed-loop GPT-Policy-style teacher in MuJoCo",
                 cube_start=[float(cube[0]), float(cube[1]), float(cube[2])],
+                controller="gpt_policy_sim_agent",
             )
 
-            plan = expert.plan(cube, start_qpos=env.qpos)
+            plan = agent.plan_episode(cube, start_qpos=env.qpos)
+            metadata.variation = plan.variation
+            decisions = []
             with ACTEpisodeWriter(output_path, metadata) as writer:
-                for ref in plan.refs:
+                phase_starts = {int(phase["start"]): phase for phase in plan.phases}
+                for step, ref in enumerate(plan.refs):
+                    if step in phase_starts:
+                        observation = agent.observe(step)
+                        decision = agent.decide(step, ref)
+                        decisions.append(
+                            {
+                                "observation": observation.as_dict(),
+                                "decision": decision,
+                                "camera_observations": list(CAMERA_NAMES),
+                            }
+                        )
                     env.set_ctrl(ref)
                     env.step()
                     cube_qpos = env.data.qpos[env.cube_qpos_adr : env.cube_qpos_adr + 7]
@@ -94,6 +112,21 @@ def collect_dataset(
                         timestamp=env.sim_time,
                     )
             paths.append(output_path)
+            with trace_path.open("a", encoding="utf-8") as trace:
+                trace.write(
+                    json.dumps(
+                        {
+                            "episode_id": episode_id,
+                            "path": str(output_path),
+                            "controller": "gpt_policy_sim_agent",
+                            "cube_start": cube[:3].astype(float).tolist(),
+                            "variation": plan.variation,
+                            "decisions": decisions,
+                        },
+                        ensure_ascii=False,
+                    )
+                    + "\n"
+                )
             if verbose:
                 print(
                     f"episode {episode_id:06d}: {writer.count} steps, "

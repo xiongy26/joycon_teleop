@@ -148,30 +148,21 @@ class ELA3ReachEnv:
         return float(self.cube_position[2] - self._cube_start_z)
 
     def _maybe_grasp(self) -> None:
-        """Attach the cube after a closed gripper reaches it.
-
-        The fingers still collide with the cube normally. Once contact has
-        happened, holding a free body by tiny mesh features is numerically
-        fragile, so we retain the measured offset and carry the cube with the
-        gripper until the controller opens it again.
-        """
+        """Attach the cube after a closed gripper reaches it."""
 
         if self._grasped or float(self.data.ctrl[6]) > GRASP_CLOSE_TARGET:
             return
         if self.tip_cube_distance > GRASP_DISTANCE:
             return
         mujoco = self._mujoco
-        cube_geom_id = mujoco.mj_name2id(
-            self.model, mujoco.mjtObj.mjOBJ_GEOM, "cube_geom"
-        )
+        cube_geom_id = mujoco.mj_name2id(self.model, mujoco.mjtObj.mjOBJ_GEOM, "cube_geom")
         finger_ids = {
             mujoco.mj_name2id(self.model, mujoco.mjtObj.mjOBJ_GEOM, name)
             for name in ("finger_left_visual", "finger_right_visual")
         }
         touching = any(
-            {self.data.contact[i].geom1, self.data.contact[i].geom2}
-            & {cube_geom_id}
-            and ({self.data.contact[i].geom1, self.data.contact[i].geom2} & finger_ids)
+            cube_geom_id in {self.data.contact[i].geom1, self.data.contact[i].geom2}
+            and bool({self.data.contact[i].geom1, self.data.contact[i].geom2} & finger_ids)
             for i in range(int(self.data.ncon))
         )
         if not touching:

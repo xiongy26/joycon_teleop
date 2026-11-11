@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 import mujoco
 import numpy as np
@@ -74,6 +74,11 @@ class ExpertPlan:
     """Reference joint trajectory (one row per control step)."""
 
     refs: np.ndarray  # [T, 7]
+    # Human-readable segments used by the simulation agent trace.  Keeping
+    # this beside the trajectory makes replay/debugging independent of the
+    # collector implementation.
+    phases: list[dict] = field(default_factory=list)
+    variation: dict = field(default_factory=dict)
 
     @property
     def num_steps(self) -> int:
@@ -141,18 +146,64 @@ class ReachExpert:
             )
         return q
 
-    def _segment(self, start: np.ndarray, end: np.ndarray) -> np.ndarray:
+    def _segment(
+        self,
+        start: np.ndarray,
+        end: np.ndarray,
+        *,
+        duration_scale: float = 1.0,
+    ) -> np.ndarray:
         duration = max(
             self.min_segment_duration,
             float(np.abs(end - start).max()) / self.max_joint_speed,
         )
+        duration *= float(duration_scale)
         return min_jerk_trajectory(start, end, duration, self.rate_hz)
 
-    def plan(self, cube_xyz: np.ndarray, *, start_qpos: np.ndarray) -> ExpertPlan:
+    def plan(
+        self,
+        cube_xyz: np.ndarray,
+        *,
+        start_qpos: np.ndarray,
+        rng: np.random.Generator | None = None,
+        humanize: bool = True,
+    ) -> ExpertPlan:
+        """Plan one pick while adding bounded, reproducible human-like variation.
+
+        The nominal task is unchanged, but each episode gets slightly different
+        approach offsets, heights, timing, and settling pauses.  This avoids
+        feeding ACT a stack of identical trajectories while keeping every target
+        inside the reachable workspace.  ``rng`` is explicit so experiments can
+        be reproduced from a seed.
+        """
+
+        if rng is None:
+            rng = np.random.default_rng()
         cube = np.asarray(cube_xyz, dtype=np.float64)[:3]
-        hover_target = np.array([cube[0], cube[1], CUBE_Z + self.hover_height])
-        touch_target = np.array([cube[0], cube[1], CUBE_Z + self.touch_height])
-        lift_target = np.array([cube[0], cube[1], CUBE_Z + self.lift_height])
+        if humanize:
+            approach_xy = np.clip(rng.normal(0.0, 0.006, size=2), -0.014, 0.014)
+            # The approach can look imperfect, but the final alignment must
+            # still land over the cube so contact remains reliable.
+            touch_xy = np.clip(rng.normal(0.0, 0.0012, size=2), -0.0025, 0.0025)
+            lift_xy = touch_xy + np.clip(rng.normal(0.0, 0.002, size=2), -0.005, 0.005)
+            hover_height = float(np.clip(self.hover_height + rng.normal(0.0, 0.012), 0.14, 0.21))
+            touch_height = float(np.clip(self.touch_height + rng.normal(0.0, 0.003), 0.019, 0.036))
+            lift_height = float(np.clip(self.lift_height + rng.normal(0.0, 0.018), 0.14, 0.21))
+            speed_scale = float(np.clip(rng.normal(1.0, 0.10), 0.82, 1.22))
+            close_steps = max(10, int(round(self.close_steps + rng.normal(0.0, 3.0))))
+            lift_hold_steps = max(10, int(round(self.lift_hold_steps + rng.normal(0.0, 3.0))))
+        else:
+            approach_xy = touch_xy = lift_xy = np.zeros(2)
+            hover_height = self.hover_height
+            touch_height = self.touch_height
+            lift_height = self.lift_height
+            speed_scale = 1.0
+            close_steps = self.close_steps
+            lift_hold_steps = self.lift_hold_steps
+
+        hover_target = np.array([cube[0] + approach_xy[0], cube[1] + approach_xy[1], CUBE_Z + hover_height])
+        touch_target = np.array([cube[0] + touch_xy[0], cube[1] + touch_xy[1], CUBE_Z + touch_height])
+        lift_target = np.array([cube[0] + lift_xy[0], cube[1] + lift_xy[1], CUBE_Z + lift_height])
 
         q_start = np.asarray(start_qpos, dtype=np.float64).copy()
         q_open = q_start.copy()
@@ -166,11 +217,31 @@ class ReachExpert:
         q_lift = self._ik(lift_target, q_seed=q_touch)
         q_lift[6] = self.close_gripper
 
-        refs = [self._segment(q_start, q_open)]
-        refs.append(self._segment(q_open, q_hover))
-        refs.append(self._segment(q_hover, q_touch))
-        refs.append(self._segment(q_touch, q_close))
-        refs.append(np.tile(q_close, (self.close_steps, 1)))
-        refs.append(self._segment(q_close, q_lift))
-        refs.append(np.tile(q_lift, (self.lift_hold_steps, 1)))
-        return ExpertPlan(refs=np.vstack(refs))
+        segments = [
+            ("open", self._segment(q_start, q_open, duration_scale=speed_scale), "张开夹爪并回到可观察的起始姿态"),
+            ("hover", self._segment(q_open, q_hover, duration_scale=speed_scale), "从顶部接近方块，保留一小段安全高度"),
+            ("align", self._segment(q_hover, q_touch, duration_scale=speed_scale * 1.08), "根据当前观测做一次轻微对准修正"),
+            ("close", self._segment(q_touch, q_close, duration_scale=speed_scale * 0.9), "看到指尖接近方块后闭合夹爪"),
+            ("hold", np.tile(q_close, (close_steps, 1)), "停顿确认夹爪已经夹住方块"),
+            ("lift", self._segment(q_close, q_lift, duration_scale=speed_scale), "保持夹爪闭合并抬高方块"),
+            ("settle", np.tile(q_lift, (lift_hold_steps, 1)), "停住观察方块仍被稳定抓住"),
+        ]
+        refs = []
+        phases = []
+        cursor = 0
+        for name, segment, note in segments:
+            refs.append(segment)
+            phases.append({"name": name, "start": cursor, "end": cursor + len(segment), "note": note})
+            cursor += len(segment)
+        variation = {
+            "approach_xy_offset_m": approach_xy.tolist(),
+            "touch_xy_offset_m": touch_xy.tolist(),
+            "lift_xy_offset_m": lift_xy.tolist(),
+            "hover_height_m": hover_height,
+            "touch_height_m": touch_height,
+            "lift_height_m": lift_height,
+            "speed_scale": speed_scale,
+            "close_steps": close_steps,
+            "lift_hold_steps": lift_hold_steps,
+        }
+        return ExpertPlan(refs=np.vstack(refs), phases=phases, variation=variation)

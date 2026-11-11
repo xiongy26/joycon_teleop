@@ -28,6 +28,8 @@ class EpisodeMetadata:
     sim: bool = False
     action_semantics: str = "next qpos target; final action duplicates final qpos"
     cube_start: Optional[list] = None
+    controller: str = ""
+    variation: Optional[dict] = None
 
 
 class ACTEpisodeWriter:

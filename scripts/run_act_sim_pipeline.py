@@ -2,7 +2,7 @@
 """One-command ACT validation pipeline in MuJoCo simulation.
 
 Runs, in order:
-  1. automatic demonstration collection with a scripted IK expert,
+  1. closed-loop demonstration collection with a GPT-Policy-style local teacher,
   2. dataset inspection (existing inspect_act_dataset.py),
   3. ACT training (existing scripts/train_act_policy.py, unmodified),
   4. closed-loop policy rollouts in MuJoCo with success-rate reporting.
@@ -49,6 +49,12 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--image-downsample", type=int, default=1)
     parser.add_argument("--rate", type=float, default=20.0)
     parser.add_argument("--eval-episodes", type=int, default=12)
+    parser.add_argument(
+        "--horizon",
+        type=int,
+        default=None,
+        help="evaluation control steps (default: max collected episode length + 10)",
+    )
     parser.add_argument("--query-interval", type=int, default=10)
     parser.add_argument("--max-target-delta", type=float, default=0.08)
     parser.add_argument("--device", default=None, help="torch device (default: cuda if available)")
@@ -75,6 +81,8 @@ def main(argv: list[str] | None = None) -> int:
         parser.error("--epochs must be positive")
     if args.eval_episodes <= 0:
         parser.error("--eval-episodes must be positive")
+    if args.horizon is not None and args.horizon <= 0:
+        parser.error("--horizon must be positive")
     if args.chunk_size <= 0:
         parser.error("--chunk-size must be positive")
     if args.batch_size <= 0:
@@ -118,6 +126,18 @@ def main(argv: list[str] | None = None) -> int:
         paths = sorted(data_dir.glob("episode_*.hdf5"))
         if not paths:
             raise RuntimeError(f"--skip-collect but no episodes found in {data_dir}")
+
+    if args.horizon is None:
+        import h5py
+
+        with h5py.File(paths[0], "r") as h5:
+            max_episode_steps = int(h5["action"].shape[0])
+        # Humanized plans can be longer than the old fixed 130-step horizon.
+        # Use all collected steps plus a short settling tail.
+        for path in paths[1:]:
+            with h5py.File(path, "r") as h5:
+                max_episode_steps = max(max_episode_steps, int(h5["action"].shape[0]))
+        args.horizon = max(130, max_episode_steps + 10)
 
     # 2. dataset inspection (existing tooling) ------------------------
     _run(
@@ -163,6 +183,7 @@ def main(argv: list[str] | None = None) -> int:
         checkpoint,
         output_dir=eval_dir,
         num_episodes=args.eval_episodes,
+        horizon=args.horizon,
         query_interval=args.query_interval,
         max_target_delta=args.max_target_delta,
         device=device,
@@ -180,6 +201,7 @@ def main(argv: list[str] | None = None) -> int:
             "image_size": args.image_size,
             "control_hz": args.rate,
             "query_interval": args.query_interval,
+            "horizon": args.horizon,
             "max_target_delta": args.max_target_delta,
             "device": device,
         },
@@ -226,7 +248,8 @@ def _write_markdown_report(out_dir: Path, report: dict) -> None:
         "",
         "## 数据与训练",
         "",
-        f"- 演示数据: `{report['out_dir']}/data` (脚本化 IK 专家自动采集)",
+        f"- 演示数据: `{report['out_dir']}/data` (观测→决策→执行的仿真教师采集)",
+        f"- 决策轨迹: `{report['out_dir']}/data/agent_trace.jsonl` (每个阶段的状态与结构化动作)",
         f"- 训练日志: `train.log`, 最优 checkpoint: `ckpt/policy_best.pt`",
         "",
         "## 闭环评估结果",

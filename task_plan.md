@@ -2,7 +2,7 @@
 
 Goal: Add standard camera + joint-state ACT episode data collection and training for EL-A3 demonstrations.
 
-Current Phase: Complete
+Current Phase: Verification and delivery
 
 ## Phases
 
@@ -20,6 +20,10 @@ Current Phase: Complete
 - complete: Implement deployment preflight safety checker.
 - complete: Document preflight usage.
 - complete: Run preflight syntax/help verification.
+- complete: Resolve user edit conflicts in episode writer and MuJoCo environment.
+- complete: Add GPT-Policy-style closed-loop simulation teacher and structured decision trace.
+- complete: Add bounded human-like trajectory variation and verify grasp success across varied episodes.
+- in_progress: Run end-to-end collection/training/evaluation smoke test and sync the daily workspace.
 
 ## Key Questions
 

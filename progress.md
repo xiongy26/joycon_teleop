@@ -34,3 +34,11 @@
 - Instantiated `ACTPolicy` and verified `export_config()` returns deployment metadata.
 - `python scripts/preflight_act_policy.py --help` passed.
 - Built a temporary minimal checkpoint and ran `preflight_act_policy.py --skip-cameras --skip-robot --device cpu`; all checks passed.
+
+## 2026-11-12
+
+- Resolved the user-edit merge conflicts in `act_data/episode_writer.py` and `act_sim/env.py`, keeping both the newer pick-task wording and the stable grasp-carry behavior.
+- Added `act_sim/agent.py`: a local GPT-Policy-inspired observe→decide→execute wrapper with structured phase decisions.
+- Added bounded human-like variation to `ReachExpert.plan()` and stored variation/controller metadata in each HDF5 episode.
+- Added `agent_trace.jsonl` output with measured observations and decisions at each phase boundary.
+- Smoke collected 10 varied episodes at 32x32 resolution; all lifted the cube by at least 8.3 cm and had different step counts/speed factors.

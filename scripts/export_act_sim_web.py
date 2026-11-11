@@ -70,10 +70,11 @@ def export_rollouts(run_dir: Path) -> list[dict]:
     results = json.loads(results_path.read_text()) if results_path.exists() else {}
     meta = {ep["episode"]: ep for ep in results.get("episodes", [])}
     rollouts = []
-    for key in sorted(traces.files, key=lambda s: int(s.split("_")[1])):
+    # Filter before sorting: rollout_traces also contains cube/qpos/dist keys,
+    # whose second token is not an integer (e.g. ``qpos_0``).
+    ctrl_keys = [key for key in traces.files if key.startswith("ctrl_")]
+    for key in sorted(ctrl_keys, key=lambda s: int(s.split("_")[1])):
         i = int(key.split("_")[1])
-        if not key.startswith("ctrl_"):
-            continue
         ep = meta.get(i, {})
         rollouts.append(
             {

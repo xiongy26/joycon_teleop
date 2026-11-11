@@ -211,6 +211,26 @@ python scripts/serve_act_sim_viewer.py        # 自动导出最新 run 数据并
 
 查看器支持三种模式：**交互仿真**（暂停/归位、拖滑块控制 7 个关节指令、移动方块、切换自由/cam_high/cam_wrist 视角、显示接触点）、**演示回放**（回放自动采集的 HDF5 演示，可拖时间轴）、**策略回放**（回放训练后策略的闭环评估轨迹，显示每步 tip-cube 距离）。相机画面与训练时离屏渲染使用同一模型定义。
 
+## 模型结构对比：`yam_arm_mujoco_standalone` vs 本项目 EL-A3 模型
+
+把 `yam_arm_mujoco_standalone` 里的 YAM 模型与 `robot/el_a3_description/urdf/scene_gripper.xml`
+叠加进同一个 MuJoCo 场景，用同样的逻辑关节角驱动两者，目视验证结构是否一致：
+
+```bash
+python scripts/view_model_overlay.py                  # 打开 3D 窗口，自动演示扫掠
+python scripts/view_model_overlay.py --gui            # 3D 窗口 + 滑条手动驱动（逻辑角 = EL-A3 关节角）
+python scripts/view_model_overlay.py --solve-report   # 只打印对齐/映射/残差报告，不开窗口
+python scripts/view_model_overlay.py --render out     # 离屏渲染若干位姿到 out_*.png
+```
+
+- 运行时自动求解基座对齐变换（两臂零位朝同一方向、joint1 轴对齐）与逐关节符号映射
+  （yam_q = s_i × EL-A3 θ_i），yam 默认半透明便于叠看（`--solid-yam` 关闭）。
+- 驱动是纯运动学回放（直接写两侧 qpos），差异纯粹反映运动学结构，不受执行器跟踪误差干扰。
+- 2026-11 实测结论：两者**关节构型一致**（底座竖直轴 → 三摆轴 → 两滚转轴，符号修正后 6 个
+  轴向夹角全为 0°），但**连杆尺寸完全不同**——大臂 0.273 m vs 0.190 m、小臂 0.262 m vs
+  0.196 m、夹爪长 0.07 m vs 0.12 m，肩部还多出 y 向偏置；同一逻辑角下末端偏差随机姿态
+  平均 97 mm / 最大 177 mm。结论：不是同一机器人，yam 模型不能当作 EL-A3 模型使用。
+
 ## Joy-Con (L) 按键说明
 
 ```

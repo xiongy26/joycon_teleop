@@ -193,6 +193,8 @@ python scripts/run_act_sim_pipeline.py --skip-collect --skip-train   # 只评估
 
 产物在 `runs/act_sim_<时间戳>/` 下：`data/`（HDF5 演示）、`ckpt/policy_best.pt`、`eval/eval_results.json`、`report.md`（成功率表格）与 `eval/rollout_*.mp4`（俯视+腕部并排回放视频）。
 
+仿真评估会沿用真机的关节限位，并默认把每个控制周期的目标变化限制为 `0.08 rad`（可用 `--max-target-delta` 调整）。成功要求最后一步距离小于 3.5 cm，且最后 20% 的轨迹至少一半时间保持在 3.5 cm 内，避免“只碰到一下”被算成成功。
+
 单独使用各模块：
 
 ```bash

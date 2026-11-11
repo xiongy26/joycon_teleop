@@ -63,6 +63,11 @@ class ELA3ReachEnv:
     ):
         import mujoco
 
+        if image_size <= 0:
+            raise ValueError("image_size must be positive")
+        if control_hz <= 0:
+            raise ValueError("control_hz must be positive")
+
         self._mujoco = mujoco
         self.model = mujoco.MjModel.from_xml_path(TASK_XML_PATH.as_posix())
         self.data = mujoco.MjData(self.model)
@@ -126,8 +131,29 @@ class ELA3ReachEnv:
 
     # -- simulation ----------------------------------------------------
 
-    def set_ctrl(self, qpos_target: np.ndarray) -> None:
-        self.data.ctrl[:] = np.asarray(qpos_target, dtype=np.float64)[: self.model.nu]
+    def set_ctrl(
+        self,
+        qpos_target: np.ndarray,
+        *,
+        max_delta: float | None = None,
+    ) -> np.ndarray:
+        """Set a checked position target and return the applied target."""
+
+        target = np.asarray(qpos_target, dtype=np.float64)
+        if target.shape != (self.model.nu,):
+            raise ValueError(
+                f"qpos_target must have shape ({self.model.nu},), got {target.shape}"
+            )
+        if np.any(~np.isfinite(target)):
+            raise ValueError("qpos_target contains NaN/Inf")
+        if max_delta is not None:
+            if max_delta < 0:
+                raise ValueError("max_delta must be non-negative")
+            current = self.qpos
+            target = current + np.clip(target - current, -max_delta, max_delta)
+        target = np.clip(target, self.qpos_limit_lower, self.qpos_limit_upper)
+        self.data.ctrl[:] = target
+        return target.copy()
 
     def step(self) -> None:
         for _ in range(self.substeps):
@@ -152,12 +178,14 @@ class ELA3ReachEnv:
         qpos = np.clip(qpos, self.qpos_limit_lower, self.qpos_limit_upper)
         self.data.qpos[self.arm_qpos_adr] = qpos
 
+        if rng is None:
+            rng = np.random.default_rng()
         cube = sample_cube_position(rng) if cube_pos is None else np.asarray(cube_pos, dtype=np.float64)
         self.data.qpos[self.cube_qpos_adr : self.cube_qpos_adr + 3] = cube[:3]
         quat = cube[3:7] if len(cube) >= 7 else np.array([1.0, 0.0, 0.0, 0.0])
         self.data.qpos[self.cube_qpos_adr + 3 : self.cube_qpos_adr + 7] = quat
 
-        self.data.ctrl[:] = HOME_QPOS
+        self.data.ctrl[:] = np.clip(HOME_QPOS, self.qpos_limit_lower, self.qpos_limit_upper)
         mujoco.mj_forward(self.model, self.data)
         steps = int(round(settle_seconds * self.control_hz)) * self.substeps
         for _ in range(steps):

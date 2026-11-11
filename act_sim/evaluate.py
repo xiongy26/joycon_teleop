@@ -27,6 +27,8 @@ EVAL_GRID_Y = (-0.40, -0.34, -0.28)
 
 
 def eval_cube_positions(count: int) -> list[np.ndarray]:
+    if count <= 0:
+        raise ValueError("count must be positive")
     positions = []
     for i in range(count):
         x = EVAL_GRID_X[i % len(EVAL_GRID_X)]
@@ -44,6 +46,7 @@ class EpisodeMetrics:
     cube_y: float
     final_distance_cm: float
     min_last20_distance_cm: float
+    tail_success_ratio: float
     success: bool
     horizon_steps: int
 
@@ -107,12 +110,20 @@ def run_rollout(
     query_interval: int,
     device: str,
     image_downsample: int,
+    max_target_delta: float = 0.08,
     seed: int = 0,
     record_frames: bool = False,
 ) -> tuple[EpisodeMetrics, list[tuple[np.ndarray, np.ndarray]], dict]:
     """One closed-loop episode: replan every query_interval steps, execute chunk."""
 
     import torch
+
+    if horizon <= 0:
+        raise ValueError("horizon must be positive")
+    if query_interval <= 0:
+        raise ValueError("query_interval must be positive")
+    if max_target_delta < 0:
+        raise ValueError("max_target_delta must be non-negative")
 
     rng = np.random.default_rng(seed)
     env.reset(cube_pos=cube_pos, qpos_noise=0.008, rng=rng)
@@ -132,7 +143,7 @@ def run_rollout(
             with torch.inference_mode():
                 chunk = policy(image_tensor, qpos_tensor)[0].cpu().numpy()
         action = chunk[min(step % query_interval, chunk.shape[0] - 1)]
-        env.set_ctrl(action)
+        action = env.set_ctrl(action, max_delta=max_target_delta)
         env.step()
         distances.append(env.tip_cube_distance)
         ctrl_log.append(np.asarray(action, dtype=np.float32).tolist())
@@ -142,13 +153,19 @@ def run_rollout(
 
     distances = np.asarray(distances)
     tail = distances[int(len(distances) * 0.8):]
+    tail_success_ratio = float(np.mean(tail < SUCCESS_DISTANCE)) if len(tail) else 0.0
     metrics = EpisodeMetrics(
         episode=-1,
         cube_x=float(cube_pos[0]),
         cube_y=float(cube_pos[1]),
         final_distance_cm=float(distances[-1] * 100),
         min_last20_distance_cm=float(tail.min() * 100) if len(tail) else float(distances.min() * 100),
-        success=bool(tail.min() < SUCCESS_DISTANCE) if len(tail) else bool(distances[-1] < SUCCESS_DISTANCE),
+        tail_success_ratio=tail_success_ratio,
+        success=bool(
+            len(tail)
+            and distances[-1] < SUCCESS_DISTANCE
+            and tail_success_ratio >= 0.5
+        ),
         horizon_steps=int(horizon),
     )
     trace = {
@@ -166,6 +183,7 @@ def evaluate_checkpoint(
     num_episodes: int = 12,
     horizon: int = 130,
     query_interval: int = 10,
+    max_target_delta: float = 0.08,
     device: str | None = None,
     image_size: int = 128,
     control_hz: float = 20.0,
@@ -174,6 +192,15 @@ def evaluate_checkpoint(
     """Run the full eval suite and write metrics + optional rollout videos."""
 
     import torch
+
+    if num_episodes <= 0:
+        raise ValueError("num_episodes must be positive")
+    if horizon <= 0:
+        raise ValueError("horizon must be positive")
+    if query_interval <= 0:
+        raise ValueError("query_interval must be positive")
+    if max_target_delta < 0:
+        raise ValueError("max_target_delta must be non-negative")
 
     output_dir = Path(output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -195,6 +222,7 @@ def evaluate_checkpoint(
                 cube_pos=cube_pos,
                 horizon=horizon,
                 query_interval=query_interval,
+                max_target_delta=max_target_delta,
                 device=device,
                 image_downsample=downsample,
                 seed=777 + i,
@@ -232,6 +260,7 @@ def evaluate_checkpoint(
         "worst_final_distance_cm": float(finals.max()),
         "horizon": horizon,
         "query_interval": query_interval,
+        "max_target_delta": max_target_delta,
         "episodes": [asdict(r) for r in results],
     }
     (output_dir / "eval_results.json").write_text(json.dumps(summary, indent=2) + "\n")
@@ -268,6 +297,12 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--episodes", type=int, default=12)
     parser.add_argument("--horizon", type=int, default=130)
     parser.add_argument("--query-interval", type=int, default=10)
+    parser.add_argument(
+        "--max-target-delta",
+        type=float,
+        default=0.08,
+        help="maximum per-control-step joint target change in radians",
+    )
     parser.add_argument("--device", default=None)
     parser.add_argument("--image-size", type=int, default=128)
     parser.add_argument("--rate", type=float, default=20.0)
@@ -281,6 +316,7 @@ def main(argv: list[str] | None = None) -> int:
         num_episodes=args.episodes,
         horizon=args.horizon,
         query_interval=args.query_interval,
+        max_target_delta=args.max_target_delta,
         device=args.device,
         image_size=args.image_size,
         control_hz=args.rate,

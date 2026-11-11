@@ -50,6 +50,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--rate", type=float, default=20.0)
     parser.add_argument("--eval-episodes", type=int, default=12)
     parser.add_argument("--query-interval", type=int, default=10)
+    parser.add_argument("--max-target-delta", type=float, default=0.08)
     parser.add_argument("--device", default=None, help="torch device (default: cuda if available)")
     parser.add_argument("--num-workers", type=int, default=4)
     parser.add_argument("--seed", type=int, default=1000)
@@ -67,6 +68,23 @@ def main(argv: list[str] | None = None) -> int:
         args.epochs = min(args.epochs, 3)
         args.eval_episodes = min(args.eval_episodes, 2)
         args.num_workers = 0
+
+    if args.episodes <= 0:
+        parser.error("--episodes must be positive")
+    if args.epochs <= 0:
+        parser.error("--epochs must be positive")
+    if args.eval_episodes <= 0:
+        parser.error("--eval-episodes must be positive")
+    if args.chunk_size <= 0:
+        parser.error("--chunk-size must be positive")
+    if args.batch_size <= 0:
+        parser.error("--batch-size must be positive")
+    if args.rate <= 0:
+        parser.error("--rate must be positive")
+    if args.query_interval <= 0:
+        parser.error("--query-interval must be positive")
+    if args.max_target_delta < 0:
+        parser.error("--max-target-delta cannot be negative")
 
     stamp = time.strftime("%Y%m%d_%H%M%S")
     out_dir = Path(args.out_dir) if args.out_dir else Path("runs") / f"act_sim_{stamp}"
@@ -146,6 +164,7 @@ def main(argv: list[str] | None = None) -> int:
         output_dir=eval_dir,
         num_episodes=args.eval_episodes,
         query_interval=args.query_interval,
+        max_target_delta=args.max_target_delta,
         device=device,
         image_size=args.image_size,
         control_hz=args.rate,
@@ -161,6 +180,7 @@ def main(argv: list[str] | None = None) -> int:
             "image_size": args.image_size,
             "control_hz": args.rate,
             "query_interval": args.query_interval,
+            "max_target_delta": args.max_target_delta,
             "device": device,
         },
         "eval": summary,
@@ -217,13 +237,14 @@ def _write_markdown_report(out_dir: Path, report: dict) -> None:
         f"- 中位最终距离: {ev['median_final_distance_cm']:.2f} cm",
         f"- 最差最终距离: {ev['worst_final_distance_cm']:.2f} cm",
         "",
-        "| episode | cube_x | cube_y | final (cm) | tail min (cm) | result |",
-        "|---|---|---|---|---|---|",
+        "| episode | cube_x | cube_y | final (cm) | tail min (cm) | tail under threshold | result |",
+        "|---|---|---|---|---|---:|---|",
     ]
     for ep in ev["episodes"]:
         lines.append(
             f"| {ep['episode']} | {ep['cube_x']:+.2f} | {ep['cube_y']:+.2f} "
             f"| {ep['final_distance_cm']:.2f} | {ep['min_last20_distance_cm']:.2f} "
+            f"| {ep['tail_success_ratio'] * 100:.0f}% "
             f"| {'成功' if ep['success'] else '失败'} |"
         )
     lines += [

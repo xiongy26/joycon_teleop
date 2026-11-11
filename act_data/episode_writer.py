@@ -34,6 +34,14 @@ class ACTEpisodeWriter:
     """Stream an ACT episode to HDF5 with extendable datasets."""
 
     def __init__(self, path: str | Path, metadata: EpisodeMetadata):
+        if metadata.qpos_dim <= 0:
+            raise ValueError("qpos_dim must be positive")
+        if metadata.action_dim <= 0 or metadata.action_dim > metadata.qpos_dim:
+            raise ValueError("action_dim must be positive and no larger than qpos_dim")
+        if metadata.sample_rate_hz <= 0:
+            raise ValueError("sample_rate_hz must be positive")
+        if not metadata.camera_names:
+            raise ValueError("at least one camera name is required")
         self.path = Path(path)
         self.metadata = metadata
         self._h5 = None

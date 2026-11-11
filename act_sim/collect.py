@@ -50,6 +50,13 @@ def collect_dataset(
     ``action[t] = qpos[t+1]`` exactly like real-robot collection.
     """
 
+    if num_episodes <= 0:
+        raise ValueError("num_episodes must be positive")
+    if control_hz <= 0:
+        raise ValueError("control_hz must be positive")
+    if image_size <= 0:
+        raise ValueError("image_size must be positive")
+
     env = ELA3ReachEnv(image_size=image_size, control_hz=control_hz)
     expert = ReachExpert(env, rate_hz=control_hz)
     output_dir = Path(output_dir)

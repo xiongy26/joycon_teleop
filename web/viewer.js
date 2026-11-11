@@ -7,9 +7,15 @@ import * as THREE from "./vendor/three.module.js";
 import loadMujoco from "./vendor/mujoco_wasm.js";
 
 const XML_URL = "../act_sim/el_a3_pick_scene.xml";
-const MESH_URLS = [
-  "l1.stl", "l2.stl", "l3.stl", "l4.stl", "l5.stl", "l6.stl", "el05_l6.stl", "jaw.stl",
-].map((f) => `../robot/el_a3_description/meshes/${f}`);
+// Keep the virtual filenames identical to the names used by the XML.  The
+// browser has no access to the repository filesystem, so every mesh referenced
+// by the scene must be downloaded explicitly into MuJoCo's MEMFS first.
+const MESH_ASSETS = [
+  ...["l1.stl", "l2.stl", "l3.stl", "l4.stl", "l5.stl", "l6.stl", "el05_l6.stl", "jaw.stl", "yam_gripper_rail.stl"]
+    .map((name) => ({ name, url: `../robot/el_a3_description/meshes/${name}` })),
+  { name: "tip_left.stl", url: "../yam_arm_mujoco_standalone/yam_arm_standalone/yam/assets/tip_left.stl" },
+  { name: "tip_right.stl", url: "../yam_arm_mujoco_standalone/yam_arm_standalone/yam/assets/tip_right.stl" },
+];
 const EPISODES_URL = "./data/episodes.json";
 const ROLLOUTS_URL = "./data/rollouts.json";
 
@@ -22,6 +28,17 @@ const statusEl = $("status");
 
 function setStatus(msg) {
   statusEl.textContent = msg;
+}
+
+function errorMessage(error) {
+  if (error instanceof Error && error.message) return error.message;
+  if (typeof error === "string" && error.trim()) return error;
+  if (error && typeof error.message === "string" && error.message.trim()) return error.message;
+  try {
+    const text = JSON.stringify(error);
+    if (text && text !== "{}") return text;
+  } catch (e) { /* ignore non-serializable errors */ }
+  return "未知错误（请打开浏览器控制台查看详情）";
 }
 
 // Emscripten/embind array-like -> JS array (supports both view and handle).
@@ -60,18 +77,27 @@ class Viewer {
     try { fs.mkdir("/working"); } catch (e) { /* exists */ }
     try { fs.mkdir("/working/meshes"); } catch (e) { /* exists */ }
     setStatus("下载 mesh …");
-    for (let i = 0; i < MESH_URLS.length; i++) {
-      const resp = await fetch(MESH_URLS[i]);
-      if (!resp.ok) throw new Error(`fetch ${MESH_URLS[i]} -> ${resp.status}`);
-      fs.writeFile(`/working/meshes/${MESH_URLS[i].split("/").pop()}`, new Uint8Array(await resp.arrayBuffer()));
+    for (const asset of MESH_ASSETS) {
+      const resp = await fetch(asset.url);
+      if (!resp.ok) throw new Error(`下载 ${asset.name} 失败（HTTP ${resp.status}）`);
+      fs.writeFile(`/working/meshes/${asset.name}`, new Uint8Array(await resp.arrayBuffer()));
     }
     setStatus("加载模型 …");
-    let xml = await (await fetch(XML_URL)).text();
-    xml = xml.replace('meshdir="[^"]*"', 'meshdir="meshes"');
+    const xmlResp = await fetch(XML_URL);
+    if (!xmlResp.ok) throw new Error(`下载场景 XML 失败（HTTP ${xmlResp.status}）`);
+    let xml = await xmlResp.text();
+    // All assets are placed in one MEMFS directory.  Flatten paths from the
+    // source XML (including the yam tip meshes) so MuJoCo does not resolve
+    // them outside /working/meshes.
     xml = xml.replace(/meshdir="[^"]*"/, 'meshdir="meshes"');
+    xml = xml.replace(/(<mesh\b[^>]*\bfile=")[^"]+(")/g, (match, prefix, suffix) => {
+      const file = match.match(/\bfile="([^"]+)"/)[1];
+      return `${prefix}${file.split(/[\\/]/).pop()}${suffix}`;
+    });
     fs.writeFile("/working/scene.xml", xml);
 
     this.model = m.MjModel.loadFromXML("/working/scene.xml");
+    if (!this.model) throw new Error("MuJoCo 没有返回模型对象");
     this.data = new m.MjData(this.model);
 
     const id2 = (type, name) => m.mj_name2id(this.model, type, name);
@@ -541,15 +567,16 @@ class Viewer {
 }
 
 async function main() {
-  setStatus("加载 MuJoCo WASM …");
-  const mujoco = await loadMujoco();
-  setStatus("初始化 …");
-  const viewer = new Viewer(mujoco);
+  let viewer;
   try {
+    setStatus("加载 MuJoCo WASM …");
+    const mujoco = await loadMujoco();
+    setStatus("初始化 …");
+    viewer = new Viewer(mujoco);
     await viewer.loadModel();
   } catch (err) {
     console.error(err);
-    setStatus(`模型加载失败: ${err.message}`);
+    setStatus(`模型加载失败：${errorMessage(err)}`);
     return;
   }
   viewer.loadPlaybackData();

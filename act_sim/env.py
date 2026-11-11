@@ -49,6 +49,35 @@ def sample_cube_position(rng: np.random.Generator) -> np.ndarray:
     return np.array([x, y, CUBE_Z, *quat])
 
 
+def sample_training_cube_position(
+    rng: np.random.Generator,
+    episode_index: int,
+) -> np.ndarray:
+    """Sample a training pose with deliberate workspace coverage.
+
+    Uniform sampling can leave workspace corners sparsely represented in a
+    finite dataset. Cycle through a 4x3 grid, then jitter inside each cell so
+    the policy sees the full rectangle without memorising eval coordinates.
+    """
+
+    if episode_index < 0:
+        raise ValueError("episode_index must be non-negative")
+    x_edges = np.linspace(CUBE_X_RANGE[0], CUBE_X_RANGE[1], 5)
+    y_edges = np.linspace(CUBE_Y_RANGE[0], CUBE_Y_RANGE[1], 4)
+    cell = int(episode_index) % 12
+    x_cell = cell % 4
+    y_cell = cell // 4
+    x_mid = (x_edges[x_cell] + x_edges[x_cell + 1]) / 2.0
+    y_mid = (y_edges[y_cell] + y_edges[y_cell + 1]) / 2.0
+    x_half = (x_edges[x_cell + 1] - x_edges[x_cell]) / 2.0
+    y_half = (y_edges[y_cell + 1] - y_edges[y_cell]) / 2.0
+    x = np.clip(x_mid + rng.uniform(-0.7, 0.7) * x_half, *CUBE_X_RANGE)
+    y = np.clip(y_mid + rng.uniform(-0.7, 0.7) * y_half, *CUBE_Y_RANGE)
+    yaw = rng.uniform(-np.pi, np.pi)
+    quat = np.array([np.cos(yaw / 2), 0.0, 0.0, np.sin(yaw / 2)])
+    return np.array([x, y, CUBE_Z, *quat])
+
+
 class ELA3ReachEnv:
     """Position-controlled EL-A3 pick task with two task cameras.
 

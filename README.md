@@ -191,6 +191,8 @@ python scripts/run_act_sim_pipeline.py --quick               # 冒烟配置（3 
 python scripts/run_act_sim_pipeline.py --skip-collect --skip-train   # 只评估已有 checkpoint
 ```
 
+采集默认按 4×3 工作区网格轮换方块位置，并在每个网格内抖动；这样边缘位置不会因为随机采样碰巧没采到。需要和旧版本做对比时可加 `--cube-sampling random`。
+
 产物在 `runs/act_sim_<时间戳>/` 下：`data/`（HDF5 演示）、`ckpt/policy_best.pt`、`eval/eval_results.json`、`report.md`（成功率表格）与 `eval/rollout_*.mp4`（俯视+腕部并排回放视频）。
 
 仿真评估会沿用真机的关节限位，并默认把每个控制周期的目标变化限制为 `0.08 rad`（可用 `--max-target-delta` 调整）。成功要求方块被抬高至少 4 cm 且夹爪仍保持夹住；tip-cube 距离和尾段停留比例继续作为诊断指标。

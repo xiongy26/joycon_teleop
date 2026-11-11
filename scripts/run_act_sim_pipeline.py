@@ -61,6 +61,12 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--num-workers", type=int, default=4)
     parser.add_argument("--seed", type=int, default=1000)
     parser.add_argument(
+        "--cube-sampling",
+        choices=("stratified", "random"),
+        default="stratified",
+        help="workspace coverage strategy for demonstrations",
+    )
+    parser.add_argument(
         "--quick",
         action="store_true",
         help="Tiny smoke-test configuration (few episodes/epochs/evals)",
@@ -120,6 +126,7 @@ def main(argv: list[str] | None = None) -> int:
             image_size=args.image_size,
             control_hz=args.rate,
             seed=args.seed,
+            cube_sampling=args.cube_sampling,
         )
         print(f"collected {len(paths)} episodes in {time.perf_counter() - start:.1f}s")
     else:
@@ -204,6 +211,7 @@ def main(argv: list[str] | None = None) -> int:
             "horizon": args.horizon,
             "max_target_delta": args.max_target_delta,
             "device": device,
+            "cube_sampling": args.cube_sampling,
         },
         "eval": summary,
     }

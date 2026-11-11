@@ -14,7 +14,12 @@ if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
 from act_data.episode_writer import ACTEpisodeWriter, EpisodeMetadata
-from act_sim.env import CAMERA_NAMES, ELA3ReachEnv, sample_cube_position
+from act_sim.env import (
+    CAMERA_NAMES,
+    ELA3ReachEnv,
+    sample_cube_position,
+    sample_training_cube_position,
+)
 from act_sim.agent import GPTPolicySimAgent
 
 
@@ -41,6 +46,7 @@ def collect_dataset(
     control_hz: float = 20.0,
     seed: int = 1000,
     qpos_noise: float = 0.008,
+    cube_sampling: str = "stratified",
     verbose: bool = True,
 ) -> list[Path]:
     """Collect varied, closed-loop demonstrations into ACT HDF5 episodes.
@@ -59,6 +65,8 @@ def collect_dataset(
         raise ValueError("control_hz must be positive")
     if image_size <= 0:
         raise ValueError("image_size must be positive")
+    if cube_sampling not in {"stratified", "random"}:
+        raise ValueError("cube_sampling must be 'stratified' or 'random'")
 
     env = ELA3ReachEnv(image_size=image_size, control_hz=control_hz)
     output_dir = Path(output_dir)
@@ -68,7 +76,11 @@ def collect_dataset(
     try:
         for episode in range(num_episodes):
             rng = np.random.default_rng(seed + episode)
-            cube = sample_cube_position(rng)
+            cube = (
+                sample_training_cube_position(rng, episode)
+                if cube_sampling == "stratified"
+                else sample_cube_position(rng)
+            )
             env.reset(cube_pos=cube, qpos_noise=qpos_noise, rng=rng)
             agent = GPTPolicySimAgent(env, rate_hz=control_hz, rng=rng)
 
@@ -150,6 +162,12 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--rate", type=float, default=20.0, help="control/collection rate in Hz")
     parser.add_argument("--seed", type=int, default=1000)
     parser.add_argument("--qpos-noise", type=float, default=0.008)
+    parser.add_argument(
+        "--cube-sampling",
+        choices=("stratified", "random"),
+        default="stratified",
+        help="workspace coverage strategy for cube positions",
+    )
     args = parser.parse_args(argv)
 
     start = time.perf_counter()
@@ -161,6 +179,7 @@ def main(argv: list[str] | None = None) -> int:
         control_hz=args.rate,
         seed=args.seed,
         qpos_noise=args.qpos_noise,
+        cube_sampling=args.cube_sampling,
     )
     elapsed = time.perf_counter() - start
     print(f"collected {len(paths)} episodes in {elapsed:.1f}s -> {args.output_dir}")

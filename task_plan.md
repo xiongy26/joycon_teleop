@@ -23,7 +23,7 @@ Current Phase: Verification and delivery
 - complete: Resolve user edit conflicts in episode writer and MuJoCo environment.
 - complete: Add GPT-Policy-style closed-loop simulation teacher and structured decision trace.
 - complete: Add bounded human-like trajectory variation and verify grasp success across varied episodes.
-- in_progress: Run end-to-end collection/training/evaluation smoke test and sync the daily workspace.
+- in_progress: Run end-to-end collection/training/evaluation smoke test, improve workspace coverage, and sync the daily workspace.
 
 ## Key Questions
 
@@ -41,6 +41,7 @@ Current Phase: Verification and delivery
 - Policy deployment should use `ELA3RealtimeController` so existing joint limit, densification, and velocity safety checks stay in the control path.
 - Preflight should not execute real policy motion; it only loads components, reads feedback, runs one inference, and validates the first target through dry-run safety paths.
 - Deployment targets should be clipped by both max per-step delta and joint limits before submission.
+- Demonstrations use a 4x3 stratified cube-position sampler with per-cell jitter by default; `--cube-sampling random` preserves the earlier uniform sampler for comparison.
 
 ## Errors Encountered
 

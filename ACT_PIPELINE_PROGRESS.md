@@ -24,6 +24,7 @@ Verified (2026-09-18):
 - Full run v1 (24 episodes, 80 epochs, global-avg-pool encoder): 2/12 = 17% success — encoder collapsed spatial information.
 - Full run v2 (48 episodes, 150 epochs, 4x4 spatial feature map encoder, `runs/act_sim_v2`): **11/12 = 92% success** under the earlier “hit once in the tail” metric, mean final tip-cube distance 3.2 cm. Re-run evaluation with the current persistent-tail criterion before using this number as a deployment gate. Worst case was the far corner (x=+0.09, y=-0.40). query_interval 5 vs 10 made no difference; more data (>=64 episodes) is the next lever for the last corner.
 - Browser viewer verified interactively: mesh assembly correct (raw mesh_vert + scene pose), free/cam_high/cam_wrist views, interactive cube moves, demo replay and policy rollout replay all working against real run data.
+- Demonstration collection now defaults to a 4x3 stratified cube-position sampler with per-cell jitter, giving each workspace cell repeated coverage while keeping evaluation coordinates off the exact training points.
 
 ## Current Status
 

@@ -42,3 +42,4 @@
 - Added bounded human-like variation to `ReachExpert.plan()` and stored variation/controller metadata in each HDF5 episode.
 - Added `agent_trace.jsonl` output with measured observations and decisions at each phase boundary.
 - Smoke collected 10 varied episodes at 32x32 resolution; all lifted the cube by at least 8.3 cm and had different step counts/speed factors.
+- Added a default 4x3 stratified cube-position sampler with per-cell jitter so finite ACT datasets cover workspace edges instead of relying on uniform-sampling luck. The old uniform sampler remains available with `--cube-sampling random`.

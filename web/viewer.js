@@ -31,6 +31,14 @@ function setStatus(msg) {
 }
 
 function errorMessage(error) {
+  if (error === undefined || error === null) {
+    return "未知错误（错误对象为空，请打开浏览器控制台查看详情）";
+  }
+  // MuJoCo's embind wrapper throws mjCError/CppException objects without a
+  // `message` field. Interpolating err.message used to render "undefined".
+  if (error.name === "mjCError" || error.name === "CppException") {
+    return "MuJoCo 编译场景失败（请检查 XML 和 mesh 文件路径；详细信息见控制台）";
+  }
   if (error instanceof Error && error.message) return error.message;
   if (typeof error === "string" && error.trim()) return error;
   if (error && typeof error.message === "string" && error.message.trim()) return error.message;
@@ -96,7 +104,14 @@ class Viewer {
     });
     fs.writeFile("/working/scene.xml", xml);
 
-    this.model = m.MjModel.loadFromXML("/working/scene.xml");
+    try {
+      this.model = m.MjModel.loadFromXML("/working/scene.xml");
+    } catch (err) {
+      // Keep the original embind exception in the console while exposing a
+      // useful status message in the page. mjCError.message is undefined.
+      console.error("MuJoCo loadFromXML failed", err);
+      throw new Error(errorMessage(err), { cause: err });
+    }
     if (!this.model) throw new Error("MuJoCo 没有返回模型对象");
     this.data = new m.MjData(this.model);
 

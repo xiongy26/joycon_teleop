@@ -1,4 +1,4 @@
-"""Scripted IK expert that generates reach demonstrations in simulation."""
+"""Scripted IK expert that generates pick-and-lift demonstrations."""
 
 from __future__ import annotations
 
@@ -81,7 +81,7 @@ class ExpertPlan:
 
 
 class ReachExpert:
-    """Plans home -> hover-above-cube -> touch-cube-top reference trajectories."""
+    """Plans an open -> approach -> close -> lift grasp trajectory."""
 
     def __init__(
         self,
@@ -90,9 +90,13 @@ class ReachExpert:
         rate_hz: float = 20.0,
         hover_height: float = 0.17,
         touch_height: float = 0.025,
+        lift_height: float = 0.17,
         max_joint_speed: float = 0.45,
         min_segment_duration: float = 0.9,
-        hold_steps: int = 12,
+        close_steps: int = 16,
+        lift_hold_steps: int = 16,
+        open_gripper: float = -1.35,
+        close_gripper: float = -0.60,
     ):
         self.env = env
         self.model = env.model
@@ -104,9 +108,13 @@ class ReachExpert:
         self.rate_hz = float(rate_hz)
         self.hover_height = float(hover_height)
         self.touch_height = float(touch_height)
+        self.lift_height = float(lift_height)
         self.max_joint_speed = float(max_joint_speed)
         self.min_segment_duration = float(min_segment_duration)
-        self.hold_steps = int(hold_steps)
+        self.close_steps = int(close_steps)
+        self.lift_hold_steps = int(lift_hold_steps)
+        self.open_gripper = float(open_gripper)
+        self.close_gripper = float(close_gripper)
         self._scratch = None
 
     def _scratch_data(self):
@@ -144,13 +152,25 @@ class ReachExpert:
         cube = np.asarray(cube_xyz, dtype=np.float64)[:3]
         hover_target = np.array([cube[0], cube[1], CUBE_Z + self.hover_height])
         touch_target = np.array([cube[0], cube[1], CUBE_Z + self.touch_height])
+        lift_target = np.array([cube[0], cube[1], CUBE_Z + self.lift_height])
 
-        q_start = np.asarray(start_qpos, dtype=np.float64)
+        q_start = np.asarray(start_qpos, dtype=np.float64).copy()
+        q_open = q_start.copy()
+        q_open[6] = self.open_gripper
         q_hover = self._ik(hover_target, q_seed=q_start)
+        q_hover[6] = self.open_gripper
         q_touch = self._ik(touch_target, q_seed=q_hover)
+        q_touch[6] = self.open_gripper
+        q_close = q_touch.copy()
+        q_close[6] = self.close_gripper
+        q_lift = self._ik(lift_target, q_seed=q_touch)
+        q_lift[6] = self.close_gripper
 
-        refs = [self._segment(q_start, q_hover)]
+        refs = [self._segment(q_start, q_open)]
+        refs.append(self._segment(q_open, q_hover))
         refs.append(self._segment(q_hover, q_touch))
-        hold = np.tile(q_touch, (self.hold_steps, 1))
-        refs.append(hold)
+        refs.append(self._segment(q_touch, q_close))
+        refs.append(np.tile(q_close, (self.close_steps, 1)))
+        refs.append(self._segment(q_close, q_lift))
+        refs.append(np.tile(q_lift, (self.lift_hold_steps, 1)))
         return ExpertPlan(refs=np.vstack(refs))

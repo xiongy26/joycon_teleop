@@ -445,26 +445,39 @@ class Viewer {
     const T = item.T;
     if (pb.frame >= T) pb.frame = scrub ? pb.frame : T - 1;
     const t = Math.min(pb.frame, T - 1);
+    const objectTrace = item.object_qpos || [];
+    const objectQpos = objectTrace.length ? objectTrace[t] : null;
+    const setObjectQpos = () => {
+      if (objectQpos && objectQpos.length >= 7) {
+        for (let i = 0; i < 7; i++) this.data.qpos[this.cubeQadr + i] = objectQpos[i];
+      } else {
+        this.data.qpos[this.cubeQadr + 0] = item.cube[0];
+        this.data.qpos[this.cubeQadr + 1] = item.cube[1];
+        this.data.qpos[this.cubeQadr + 2] = 0.102;
+        this.data.qpos[this.cubeQadr + 3] = 1.0;
+      }
+    };
     if (scrub) {
       // jump: set state directly
       this.jointQadr.forEach((adr, i) => { this.data.qpos[adr] = item.qpos[t][i]; });
       for (let i = 0; i < Number(this.model.nv); i++) this.data.qvel[i] = 0.0;
       ARM_JOINTS.forEach((_, i) => { this.data.ctrl[i] = item.ctrl[t][i]; });
-      this.data.qpos[this.cubeQadr + 0] = item.cube[0];
-      this.data.qpos[this.cubeQadr + 1] = item.cube[1];
-      this.data.qpos[this.cubeQadr + 2] = 0.102;
-      this.data.qpos[this.cubeQadr + 3] = 1.0;
+      setObjectQpos();
       this.mujoco.mj_forward(this.model, this.data);
     } else {
       // real-time-ish: hold ctrl for one control period (20 Hz -> 50 substeps)
       ARM_JOINTS.forEach((_, i) => { this.data.ctrl[i] = item.ctrl[t][i]; });
+      setObjectQpos();
       const start = Number(this.data.time);
       while (Number(this.data.time) - start < 1 / 20) this.mujoco.mj_step(this.model, this.data);
     }
     const timeline = pb.kind === "episode" ? $("ep-timeline") : $("ro-timeline");
     timeline.value = t;
     if (pb.kind === "rollout" && item.dist) {
-      $("hud-extra").textContent = `tip-cube 距离: ${(item.dist[t] * 100).toFixed(1)} cm / 最终 ${(item.dist[item.dist.length - 1] * 100).toFixed(1)} cm`;
+      const lift = objectQpos ? ((objectQpos[2] - 0.102) * 100).toFixed(1) : null;
+      $("hud-extra").textContent = `tip-cube 距离: ${(item.dist[t] * 100).toFixed(1)} cm / 最终 ${(item.dist[item.dist.length - 1] * 100).toFixed(1)} cm` + (lift ? ` / 抬升 ${lift} cm` : "");
+    } else if (objectQpos) {
+      $("hud-extra").textContent = `方块抬升: ${((objectQpos[2] - 0.102) * 100).toFixed(1)} cm`;
     } else {
       $("hud-extra").textContent = "";
     }

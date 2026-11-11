@@ -35,7 +35,7 @@ def collect_dataset(
     output_dir: str | Path,
     *,
     num_episodes: int,
-    task_name: str = "sim_reach",
+    task_name: str = "sim_pick",
     image_size: int = 128,
     control_hz: float = 20.0,
     seed: int = 1000,
@@ -45,9 +45,9 @@ def collect_dataset(
     """Collect ``num_episodes`` scripted demonstrations into ACT HDF5 episodes.
 
     Each episode: arm settles at HOME with small joint noise, then the IK
-    expert moves the gripper tip above the cube and down onto its top face.
-    Recorded qpos is the measured joint state; the writer derives
-    ``action[t] = qpos[t+1]`` exactly like real-robot collection.
+    expert opens the gripper, approaches the cube, closes it, and lifts it.
+    Recorded qpos is the measured joint state; ``object_qpos`` stores the cube
+    trajectory so browser replays show the grasp.
     """
 
     if num_episodes <= 0:
@@ -77,7 +77,7 @@ def collect_dataset(
                 qpos_dim=7,
                 action_dim=7,
                 sim=True,
-                action_semantics="next measured qpos; scripted IK expert in MuJoCo",
+                action_semantics="next measured qpos; scripted open-close-lift IK expert in MuJoCo",
                 cube_start=[float(cube[0]), float(cube[1]), float(cube[2])],
             )
 
@@ -86,13 +86,19 @@ def collect_dataset(
                 for ref in plan.refs:
                     env.set_ctrl(ref)
                     env.step()
-                    writer.append(qpos=env.qpos, images=env.render(), timestamp=env.sim_time)
+                    cube_qpos = env.data.qpos[env.cube_qpos_adr : env.cube_qpos_adr + 7]
+                    writer.append(
+                        qpos=env.qpos,
+                        object_qpos=cube_qpos,
+                        images=env.render(),
+                        timestamp=env.sim_time,
+                    )
             paths.append(output_path)
             if verbose:
                 print(
                     f"episode {episode_id:06d}: {writer.count} steps, "
-                    f"cube at [{cube[0]:+.3f}, {cube[1]:+.3f}], final tip-cube "
-                    f"distance {env.tip_cube_distance * 100:.1f} cm",
+                    f"cube at [{cube[0]:+.3f}, {cube[1]:+.3f}], lift "
+                    f"{env.cube_lift_height * 100:.1f} cm, grasped={env.grasped}",
                     flush=True,
                 )
     finally:
@@ -106,7 +112,7 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--output-dir", default="data/act_sim")
     parser.add_argument("--episodes", type=int, default=24)
-    parser.add_argument("--task-name", default="sim_reach")
+    parser.add_argument("--task-name", default="sim_pick")
     parser.add_argument("--image-size", type=int, default=128)
     parser.add_argument("--rate", type=float, default=20.0, help="control/collection rate in Hz")
     parser.add_argument("--seed", type=int, default=1000)

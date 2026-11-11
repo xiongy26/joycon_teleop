@@ -31,6 +31,11 @@ def export_episodes(run_dir: Path, seed: int = 1000) -> list[dict]:
         with h5py.File(path, "r") as h5:
             qpos = np.asarray(h5["observations/qpos"], dtype=np.float32)
             action = np.asarray(h5["action"], dtype=np.float32)
+            object_qpos = (
+                np.asarray(h5["observations/object_qpos"], dtype=np.float32)
+                if "observations/object_qpos" in h5
+                else None
+            )
             meta = json.loads(h5.attrs.get("metadata_json", "{}"))
         cube_meta = meta.get("cube_start")
         if cube_meta:
@@ -50,6 +55,7 @@ def export_episodes(run_dir: Path, seed: int = 1000) -> list[dict]:
                 # ctrl[t] = action[t] = qpos[t+1]: the expert reference command
                 "ctrl": _round7(action),
                 "qpos": _round7(qpos),
+                **({"object_qpos": _round7(object_qpos)} if object_qpos is not None else {}),
             }
         )
     return episodes
@@ -78,6 +84,7 @@ def export_rollouts(run_dir: Path) -> list[dict]:
                 "rate": 20.0,
                 "ctrl": _round7(traces[key]),
                 "qpos": _round7(traces[f"qpos_{i}"]),
+                "object_qpos": _round7(traces[f"cube_qpos_{i}"]) if f"cube_qpos_{i}" in traces else [],
                 "dist": [round(float(v), 4) for v in traces[f"dist_{i}"]],
             }
         )

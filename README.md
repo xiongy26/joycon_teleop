@@ -181,7 +181,7 @@ python scripts/preflight_act_policy.py \
 
 ## ACT 仿真验证（MuJoCo，自动采集 + 自动训练）
 
-`act_sim/` 提供 EL-A3 的 MuJoCo 仿真任务（桌面 + 红色方块 + cam_high/cam_wrist 两个任务相机），用于在上真机前验证整条 ACT 管线：脚本化 IK 专家自动生成演示数据（无需人工示教），复用与真机完全相同的 HDF5 格式、训练脚本，然后在 MuJoCo 里做闭环 rollout 评估，输出成功率报告。末端已换成 yam 可动双指夹爪（与 `robot/el_a3_description/urdf/scene_gripper.xml` 同款，L7 耦合开合；任务仍为 reach 语义，动作维度 7 维不变）；旧场景数据在结构上兼容，但画面变了，换场景后需重新采集训练（2026-11-11 实测：80 条演示/150 epochs，闭环评估 12/12 成功）。
+`act_sim/` 提供 EL-A3 的 MuJoCo 仿真任务（桌面 + 红色方块 + cam_high/cam_wrist 两个任务相机），用于在上真机前验证整条 ACT 管线：脚本化 IK 专家自动生成演示数据（无需人工示教），复用与真机完全相同的 HDF5 格式、训练脚本，然后在 MuJoCo 里做闭环 rollout 评估，输出成功率报告。末端已换成 yam 可动双指夹爪（与 `robot/el_a3_description/urdf/scene_gripper.xml` 同款，L7 耦合开合；任务现在包含“张开→接近→夹紧→抬升”完整抓取语义，动作维度仍为 7 维）；旧场景数据在结构上兼容，但画面变了，换场景后需重新采集训练（2026-11-11 实测：80 条演示/150 epochs，闭环评估 12/12 成功）。
 
 一键运行（采集 → 数据检查 → 训练 → 闭环评估 → 报告）：
 
@@ -193,7 +193,7 @@ python scripts/run_act_sim_pipeline.py --skip-collect --skip-train   # 只评估
 
 产物在 `runs/act_sim_<时间戳>/` 下：`data/`（HDF5 演示）、`ckpt/policy_best.pt`、`eval/eval_results.json`、`report.md`（成功率表格）与 `eval/rollout_*.mp4`（俯视+腕部并排回放视频）。
 
-仿真评估会沿用真机的关节限位，并默认把每个控制周期的目标变化限制为 `0.08 rad`（可用 `--max-target-delta` 调整）。成功要求最后一步距离小于 3.5 cm，且最后 20% 的轨迹至少一半时间保持在 3.5 cm 内，避免“只碰到一下”被算成成功。
+仿真评估会沿用真机的关节限位，并默认把每个控制周期的目标变化限制为 `0.08 rad`（可用 `--max-target-delta` 调整）。成功要求方块被抬高至少 4 cm 且夹爪仍保持夹住；tip-cube 距离和尾段停留比例继续作为诊断指标。
 
 单独使用各模块：
 
@@ -211,7 +211,7 @@ python scripts/serve_act_sim_viewer.py        # 自动导出最新 run 数据并
 # 打开 http://127.0.0.1:8010/web/viewer.html
 ```
 
-查看器支持三种模式：**交互仿真**（暂停/归位、拖滑块控制 7 个关节指令、移动方块、切换自由/cam_high/cam_wrist 视角、显示接触点）、**演示回放**（回放自动采集的 HDF5 演示，可拖时间轴）、**策略回放**（回放训练后策略的闭环评估轨迹，显示每步 tip-cube 距离）。相机画面与训练时离屏渲染使用同一模型定义。
+查看器支持三种模式：**交互仿真**（暂停/归位、拖滑块控制 7 个关节指令、移动方块、切换自由/cam_high/cam_wrist 视角、显示接触点）、**演示回放**（回放自动采集的 HDF5 演示，可拖时间轴，能看到方块被夹起）、**策略回放**（回放训练后策略的闭环评估轨迹，显示每步 tip-cube 距离和抬升高度）。相机画面与训练时离屏渲染使用同一模型定义。
 
 ## 模型结构对比：`yam_arm_mujoco_standalone` vs 本项目 EL-A3 模型
 

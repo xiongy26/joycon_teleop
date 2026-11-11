@@ -232,7 +232,7 @@ def _write_markdown_report(out_dir: Path, report: dict) -> None:
         "## 闭环评估结果",
         "",
         f"- 成功率: **{ev['successes']}/{ev['num_episodes']} ({ev['success_rate'] * 100:.0f}%)**"
-        f" (阈值 {ev['success_distance_cm']:.1f} cm)",
+        f"（方块抬升至少 4 cm 且保持夹住）",
         f"- 平均最终距离: {ev['mean_final_distance_cm']:.2f} cm",
         f"- 中位最终距离: {ev['median_final_distance_cm']:.2f} cm",
         f"- 最差最终距离: {ev['worst_final_distance_cm']:.2f} cm",

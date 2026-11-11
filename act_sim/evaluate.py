@@ -17,6 +17,7 @@ from act_sim.env import (
     CAMERA_NAMES,
     ELA3ReachEnv,
     HOME_QPOS,
+    GRASP_LIFT_HEIGHT,
     SUCCESS_DISTANCE,
     sample_cube_position,
 )
@@ -45,6 +46,8 @@ class EpisodeMetrics:
     cube_x: float
     cube_y: float
     final_distance_cm: float
+    final_cube_lift_cm: float
+    max_cube_lift_cm: float
     min_last20_distance_cm: float
     tail_success_ratio: float
     success: bool
@@ -132,6 +135,7 @@ def run_rollout(
     distances: list[float] = []
     ctrl_log: list[list[float]] = []
     qpos_log: list[list[float]] = []
+    cube_qpos_log: list[list[float]] = []
     frames: list[tuple[np.ndarray, np.ndarray]] = []
 
     for step in range(horizon):
@@ -146,6 +150,9 @@ def run_rollout(
         action = env.set_ctrl(action, max_delta=max_target_delta)
         env.step()
         distances.append(env.tip_cube_distance)
+        cube_qpos_log.append(
+            env.data.qpos[env.cube_qpos_adr : env.cube_qpos_adr + 7].astype(np.float32).tolist()
+        )
         ctrl_log.append(np.asarray(action, dtype=np.float32).tolist())
         qpos_log.append(env.qpos.astype(np.float32).tolist())
         if record_frames:
@@ -159,18 +166,21 @@ def run_rollout(
         cube_x=float(cube_pos[0]),
         cube_y=float(cube_pos[1]),
         final_distance_cm=float(distances[-1] * 100),
+        final_cube_lift_cm=float(env.cube_lift_height * 100),
+        max_cube_lift_cm=float(max(np.asarray(cube_qpos_log)[:, 2] - env._cube_start_z) * 100),
         min_last20_distance_cm=float(tail.min() * 100) if len(tail) else float(distances.min() * 100),
         tail_success_ratio=tail_success_ratio,
         success=bool(
             len(tail)
-            and distances[-1] < SUCCESS_DISTANCE
-            and tail_success_ratio >= 0.5
+            and env.cube_lift_height >= GRASP_LIFT_HEIGHT
+            and env.grasped
         ),
         horizon_steps=int(horizon),
     )
     trace = {
         "ctrl": np.asarray(ctrl_log, dtype=np.float32),
         "qpos": np.asarray(qpos_log, dtype=np.float32),
+        "cube_qpos": np.asarray(cube_qpos_log, dtype=np.float32),
         "dist": distances.astype(np.float32),
     }
     return metrics, frames, trace
@@ -233,10 +243,12 @@ def evaluate_checkpoint(
             traces[f"cube_{i}"] = np.asarray(cube_pos[:3], dtype=np.float32)
             traces[f"ctrl_{i}"] = trace["ctrl"]
             traces[f"qpos_{i}"] = trace["qpos"]
+            traces[f"cube_qpos_{i}"] = trace["cube_qpos"]
             traces[f"dist_{i}"] = trace["dist"]
             print(
                 f"eval episode {i:02d}: cube=({metrics.cube_x:+.2f},{metrics.cube_y:+.2f}) "
                 f"final={metrics.final_distance_cm:.1f}cm "
+                f"lift={metrics.max_cube_lift_cm:.1f}cm "
                 f"tail_min={metrics.min_last20_distance_cm:.1f}cm "
                 f"{'SUCCESS' if metrics.success else 'FAIL'}",
                 flush=True,

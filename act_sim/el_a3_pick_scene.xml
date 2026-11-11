@@ -1,5 +1,5 @@
-<mujoco model="el_a3_act_sim_reach">
-  <!-- EL-A3 reach-validation scene for the ACT pipeline.
+<mujoco model="el_a3_act_sim_pick">
+  <!-- EL-A3 pick-and-lift scene for the ACT pipeline.
        Derived from robot/el_a3_description/urdf/scene_gripper.xml:
        gravity enabled, mocap target removed, adds table + cube + task cameras.
        Gripper swapped (2026-11-11, MERO-195): old fixed jaw mesh replaced by the
@@ -90,8 +90,8 @@
                 <!-- yam 可动双指：与 scene_gripper.xml 完全同一子树（用户确认的开合方向终版）。
                      双指滑动关节经 <equality> 与 L7 耦合：
                      L7 = 0° → 指尖并拢；L7 = -90° → 全开（每指行程 46.95 mm）。
-                     指尖可碰撞（与方块/桌面/地面），互不碰撞；ACT 任务保持 reach 语义，
-                     演示中 L7 恒为 0（并拢姿态），动作维度与旧版一致。
+                     指尖可碰撞（与方块/桌面/地面），互不碰撞；ACT 任务包含开合与抬升阶段，
+                     演示轨迹会先张开、再夹紧并抬升方块。
                      mount z=-0.053：手指根部贴住法兰面，滑轨板背面嵌入腕口 8mm；
                      gripper_tip_site(mount z=+0.141) = L6 z=-0.194，与旧固定 jaw 版分毫不差。 -->
                 <body name="yam_gripper_mount" pos="0 0 -0.053" quat="0 1 0 0">

@@ -46,6 +46,7 @@ class ACTEpisodeWriter:
         self.metadata = metadata
         self._h5 = None
         self._qpos_ds = None
+        self._object_qpos_ds = None
         self._timestamps_ds = None
         self._image_datasets: Dict[str, object] = {}
         self._qpos_buffer: list[np.ndarray] = []
@@ -104,7 +105,14 @@ class ACTEpisodeWriter:
             dtype="f8",
         )
 
-    def append(self, *, qpos: np.ndarray, images: Dict[str, np.ndarray], timestamp: Optional[float] = None) -> None:
+    def append(
+        self,
+        *,
+        qpos: np.ndarray,
+        images: Dict[str, np.ndarray],
+        timestamp: Optional[float] = None,
+        object_qpos: Optional[np.ndarray] = None,
+    ) -> None:
         if self._h5 is None or self._qpos_ds is None or self._timestamps_ds is None:
             raise RuntimeError("episode writer is not open")
 
@@ -115,6 +123,13 @@ class ACTEpisodeWriter:
             )
         if np.any(~np.isfinite(qpos)):
             raise ValueError("qpos contains NaN/Inf")
+
+        if object_qpos is not None:
+            object_qpos = np.asarray(object_qpos, dtype=np.float32)
+            if object_qpos.shape != (7,):
+                raise ValueError(f"object_qpos must have shape (7,), got {object_qpos.shape}")
+            if np.any(~np.isfinite(object_qpos)):
+                raise ValueError("object_qpos contains NaN/Inf")
 
         if set(images) != set(self.metadata.camera_names):
             raise ValueError(
@@ -133,6 +148,19 @@ class ACTEpisodeWriter:
 
         self._qpos_ds.resize((idx + 1, self.metadata.qpos_dim))
         self._qpos_ds[idx] = qpos
+        if object_qpos is not None:
+            if self._object_qpos_ds is None:
+                self._object_qpos_ds = self._h5["observations"].create_dataset(
+                    "object_qpos",
+                    shape=(0, 7),
+                    maxshape=(None, 7),
+                    chunks=(1, 7),
+                    dtype="f4",
+                )
+            self._object_qpos_ds.resize((idx + 1, 7))
+            self._object_qpos_ds[idx] = object_qpos
+        elif self._object_qpos_ds is not None:
+            raise ValueError("object_qpos must be provided for every sample once enabled")
         self._timestamps_ds.resize((idx + 1,))
         self._timestamps_ds[idx] = stamp
 

@@ -112,9 +112,37 @@
                   <site name="gripper_tip_site" pos="0 0 0.141" size="0.005" rgba="0 1 0 1" type="sphere"/>
                   <!-- 抓取参考点：位于两指之间，跟随末端法兰，不随 L7 开合转动。 -->
                   <site name="grasp_center_site" pos="0.0015 0.002 0.153" size="0.004" rgba="1 0 1 1" type="sphere"/>
-                  <!-- 腕部相机安装座固定在末端法兰，位置和朝向都随机械臂末端一起运动。 -->
-                  <body name="wrist_camera_mount" pos="0 0.015 0.035">
-                    <camera name="cam_wrist" pos="0 0 0.03" xyaxes="0.877800 -0.471165 -0.086434 -0.478712 -0.869364 -0.122639" fovy="70"/>
+                  <!--
+                       末端法兰相机总成：安装板与夹爪滑轨共用末端法兰，L 形支架把相机抬到
+                       两指后上方，避免相机落在指尖/物体内部。相机、支架和镜头都是这个 body
+                       的可视几何体，因此会随 L6/L7 一起运动；cam_wrist 的光轴仍正对夹爪中心。
+                       约束：支架只做可视件（contype=0），不会参与接触求解。
+                  -->
+                  <body name="wrist_camera_bracket" pos="0.060 0.015 0.035">
+                    <!-- 与 yam 滑轨平行的底板，直接贴在末端法兰安装面 -->
+                    <geom name="wrist_camera_bracket_plate" type="box" pos="0 0 -0.027"
+                      size="0.055 0.030 0.004" rgba="0.16 0.18 0.22 1" contype="0" conaffinity="0"/>
+                    <!-- 立柱 + 顶板，形成能看见的 L 形安装支架 -->
+                    <geom name="wrist_camera_bracket_upright" type="box" pos="0 0 0.001"
+                      size="0.006 0.022 0.028" rgba="0.22 0.24 0.28 1" contype="0" conaffinity="0"/>
+                    <geom name="wrist_camera_bracket_top" type="box" pos="0 0 0.028"
+                      size="0.034 0.022 0.004" rgba="0.22 0.24 0.28 1" contype="0" conaffinity="0"/>
+                    <!-- 两颗安装螺栓，位置与底板同轴 -->
+                    <geom name="wrist_camera_bolt_left" type="cylinder" pos="-0.026 0 -0.021"
+                      size="0.004 0.003" rgba="0.65 0.67 0.70 1" contype="0" conaffinity="0"/>
+                    <geom name="wrist_camera_bolt_right" type="cylinder" pos="0.026 0 -0.021"
+                      size="0.004 0.003" rgba="0.65 0.67 0.70 1" contype="0" conaffinity="0"/>
+                    <body name="wrist_camera" pos="0 0 0.058">
+                      <!-- 小型相机外壳 -->
+                      <geom name="wrist_camera_body" type="box" pos="0 0 0"
+                        size="0.026 0.019 0.015" rgba="0.07 0.08 0.10 1" contype="0" conaffinity="0"/>
+                      <!-- 镜头朝向夹爪（相机默认沿局部 -Z 看出去） -->
+                      <geom name="wrist_camera_bezel" type="cylinder" pos="0 0 -0.020"
+                        size="0.013 0.003" rgba="0.02 0.02 0.025 1" contype="0" conaffinity="0"/>
+                      <geom name="wrist_camera_lens" type="cylinder" pos="0 0 -0.024"
+                        size="0.009 0.0015" rgba="0.05 0.24 0.30 1" contype="0" conaffinity="0"/>
+                      <camera name="cam_wrist" pos="0 0 0" xyaxes="-0.397726 0.823484 -0.404584 0.713124 0.000000 -0.701038" fovy="70"/>
+                    </body>
                   </body>
                 </body>
 

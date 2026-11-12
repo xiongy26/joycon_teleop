@@ -34,6 +34,7 @@
 - Instantiated `ACTPolicy` and verified `export_config()` returns deployment metadata.
 - `python scripts/preflight_act_policy.py --help` passed.
 - Built a temporary minimal checkpoint and ran `preflight_act_policy.py --skip-cameras --skip-robot --device cpu`; all checks passed.
+
 ## 2026-11-12
 
 - Resolved the user-edit merge conflicts in `act_data/episode_writer.py` and `act_sim/env.py`, keeping both the newer pick-task wording and the stable grasp-carry behavior.
@@ -41,4 +42,8 @@
 - Added bounded human-like variation to `ReachExpert.plan()` and stored variation/controller metadata in each HDF5 episode.
 - Added `agent_trace.jsonl` output with measured observations and decisions at each phase boundary.
 - Smoke collected 10 varied episodes at 32x32 resolution; all lifted the cube by at least 8.3 cm and had different step counts/speed factors.
+
 - Added a default 4x3 stratified cube-position sampler with per-cell jitter so finite ACT datasets cover workspace edges instead of relying on uniform-sampling luck. The old uniform sampler remains available with `--cube-sampling random`.
+
+- Added optional delta-action supervision and simulated cube-state conditioning to make ACT experiments explicit about their state/action convention; added `scripts/record_verified_act_replay.py` with a measured grasp safety handoff.
+- Re-trained a 40-episode ablation and inspected the 512x256 replay contact sheet. The learned policy attempt did not reach the cube, so the delivered replay records the handoff and only passes when the measured cube lift is at least 4 cm; the verified run lifted 11.97 cm and ended grasped.

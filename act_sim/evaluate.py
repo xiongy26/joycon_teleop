@@ -89,7 +89,13 @@ def load_policy(checkpoint_path: str | Path, device: str):
     return policy, model_config
 
 
-def _prepare_observation(images: dict[str, np.ndarray], qpos: np.ndarray, downsample: int, device):
+def _prepare_observation(
+    images: dict[str, np.ndarray],
+    qpos: np.ndarray,
+    downsample: int,
+    device,
+    object_xyz: np.ndarray | None = None,
+):
     import torch
 
     tensors = []
@@ -100,7 +106,10 @@ def _prepare_observation(images: dict[str, np.ndarray], qpos: np.ndarray, downsa
         tensors.append(np.ascontiguousarray(image.transpose(2, 0, 1)))
     batch = np.stack(tensors, axis=0).astype(np.float32) / 255.0
     image_tensor = torch.from_numpy(batch).unsqueeze(0).to(device)
-    qpos_tensor = torch.from_numpy(np.asarray(qpos, dtype=np.float32)).unsqueeze(0).to(device)
+    state = np.asarray(qpos, dtype=np.float32)
+    if object_xyz is not None:
+        state = np.concatenate([state, np.asarray(object_xyz, dtype=np.float32)[:3]])
+    qpos_tensor = torch.from_numpy(state).unsqueeze(0).to(device)
     return image_tensor, qpos_tensor
 
 
@@ -113,6 +122,8 @@ def run_rollout(
     query_interval: int,
     device: str,
     image_downsample: int,
+    action_mode: str = "absolute",
+    include_object_state: bool = False,
     max_target_delta: float = 0.08,
     seed: int = 0,
     record_frames: bool = False,
@@ -142,10 +153,16 @@ def run_rollout(
         if step % query_interval == 0:
             images = env.render()
             image_tensor, qpos_tensor = _prepare_observation(
-                images, env.qpos, image_downsample, device
+                images,
+                env.qpos,
+                image_downsample,
+                device,
+                env.cube_position if include_object_state else None,
             )
             with torch.inference_mode():
                 chunk = policy(image_tensor, qpos_tensor)[0].cpu().numpy()
+            if action_mode == "delta":
+                chunk = chunk + env.qpos[None, :]
         action = chunk[min(step % query_interval, chunk.shape[0] - 1)]
         action = env.set_ctrl(action, max_delta=max_target_delta)
         env.step()
@@ -219,6 +236,8 @@ def evaluate_checkpoint(
 
     policy, model_config = load_policy(checkpoint_path, device)
     downsample = int(model_config.get("image_downsample", 1) or 1)
+    action_mode = str(model_config.get("action_mode", "absolute"))
+    include_object_state = bool(model_config.get("include_object_state", False))
 
     env = ELA3ReachEnv(image_size=image_size, control_hz=control_hz)
     results: list[EpisodeMetrics] = []
@@ -235,6 +254,8 @@ def evaluate_checkpoint(
                 max_target_delta=max_target_delta,
                 device=device,
                 image_downsample=downsample,
+                action_mode=action_mode,
+                include_object_state=include_object_state,
                 seed=777 + i,
                 record_frames=record,
             )

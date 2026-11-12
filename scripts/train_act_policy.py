@@ -35,6 +35,8 @@ def _make_loaders(args):
         chunk_size=args.chunk_size,
         camera_names=camera_names,
         image_downsample=args.image_downsample,
+        action_mode=args.action_mode,
+        include_object_state=args.include_object_state,
         seed=args.seed,
     )
     train_indices, val_indices = dataset.train_val_split(args.val_ratio)
@@ -159,6 +161,8 @@ def train(args: argparse.Namespace) -> None:
         "dropout": args.dropout,
         "camera_names": dataset.camera_names,
         "image_downsample": args.image_downsample,
+        "action_mode": args.action_mode,
+        "include_object_state": args.include_object_state,
     }
     config["model_config"] = model_config
     model.export_config = lambda: model_config
@@ -232,6 +236,17 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--cameras", default=None, help="Comma-separated camera names")
     parser.add_argument("--chunk-size", type=int, default=50)
     parser.add_argument("--image-downsample", type=int, default=2)
+    parser.add_argument(
+        "--action-mode",
+        choices=("absolute", "delta"),
+        default="absolute",
+        help="predict absolute qpos targets or deltas from the observed qpos",
+    )
+    parser.add_argument(
+        "--include-object-state",
+        action="store_true",
+        help="append simulated cube XYZ to the policy state (simulation-only ablation)",
+    )
     parser.add_argument("--batch-size", type=int, default=8)
     parser.add_argument("--epochs", type=int, default=100)
     parser.add_argument("--lr", type=float, default=1e-4)

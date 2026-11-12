@@ -47,18 +47,24 @@ class ACTHDF5Dataset:
         camera_names: Optional[list[str]] = None,
         image_downsample: int = 1,
         normalize_images: bool = True,
+        action_mode: str = "absolute",
+        include_object_state: bool = False,
         seed: int = 0,
     ):
         if chunk_size <= 0:
             raise ValueError("chunk_size must be positive")
         if image_downsample <= 0:
             raise ValueError("image_downsample must be positive")
+        if action_mode not in {"absolute", "delta"}:
+            raise ValueError("action_mode must be 'absolute' or 'delta'")
 
         self.episode_paths = discover_episode_files(episode_paths)
         self.chunk_size = int(chunk_size)
         self.camera_names = camera_names
         self.image_downsample = int(image_downsample)
         self.normalize_images = normalize_images
+        self.action_mode = action_mode
+        self.include_object_state = bool(include_object_state)
         self.seed = int(seed)
         self.index: list[EpisodeIndex] = []
         self._episode_lengths: dict[Path, int] = {}
@@ -115,6 +121,13 @@ class ACTHDF5Dataset:
         item = self.index[idx]
         with h5py.File(item.path, "r") as h5:
             qpos = np.asarray(h5["observations/qpos"][item.timestep], dtype=np.float32)
+            if self.include_object_state:
+                if "observations/object_qpos" not in h5:
+                    raise KeyError(f"{item.path} has no observations/object_qpos")
+                object_qpos = np.asarray(
+                    h5["observations/object_qpos"][item.timestep], dtype=np.float32
+                )
+                qpos = np.concatenate([qpos, object_qpos[:3]], axis=0)
             images = []
             assert self.camera_names is not None
             for name in self.camera_names:
@@ -129,6 +142,8 @@ class ACTHDF5Dataset:
             valid = end - item.timestep
             action = np.zeros((self.chunk_size, actions_ds.shape[1]), dtype=np.float32)
             action[:valid] = np.asarray(actions_ds[item.timestep:end], dtype=np.float32)
+            if self.action_mode == "delta":
+                action[:valid] -= qpos[:7][None, :]
             if valid < self.chunk_size:
                 action[valid:] = action[valid - 1]
             is_pad = np.ones((self.chunk_size,), dtype=bool)

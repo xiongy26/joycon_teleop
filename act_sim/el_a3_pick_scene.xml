@@ -110,13 +110,19 @@
                       rgba="0.6 0.79 0.92 1" contype="2" conaffinity="5" friction="1.0 0.02 0.001"/>
                   </body>
                   <site name="gripper_tip_site" pos="0 0 0.141" size="0.005" rgba="0 1 0 1" type="sphere"/>
+                  <!-- 抓取参考点：位于两指之间，跟随末端法兰，不随 L7 开合转动。 -->
+                  <site name="grasp_center_site" pos="0.0015 0.002 0.153" size="0.004" rgba="1 0 1 1" type="sphere"/>
+                  <!-- 腕部相机安装座固定在末端法兰；targetbody 只用于让演示画面稳定对准方块，
+                       相机的位置仍随机械臂末端一起运动。 -->
+                  <body name="wrist_camera_mount" pos="0 0.015 0.035">
+                    <camera name="cam_wrist" pos="0 0 0.03" mode="targetbody" target="cube" fovy="70"/>
+                  </body>
                 </body>
 
                 <!-- L7 载体：空 body，仅作为夹爪电机的仿真通道（与实机 7 号电机对应） -->
                 <body name="gripper_link" pos="0 0 -0.074">
                   <inertial pos="0 0 0" mass="0.05" diaginertia="0.0001 0.0001 0.0001"/>
                   <joint name="L7_joint" pos="0 0 0" axis="0 0 1" range="-1.5708 1.5708" actuatorfrcrange="-6 6" damping="0.05" frictionloss="0.05"/>
-                  <camera name="cam_wrist" pos="0 0 -0.03" xyaxes="1 0 0 0 1 0" fovy="70"/>
                 </body>
               </body>
             </body>

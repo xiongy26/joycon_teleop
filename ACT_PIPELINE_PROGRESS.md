@@ -261,3 +261,4 @@ Reason: current environment has `torch`, but does not have `h5py` or `cv2` insta
 - `act_data/episode_writer.py`
 - `act_data/dataset.py`
 - `act_data/policy.py`
+- Demonstration collection now defaults to a 4x3 stratified cube-position sampler with per-cell jitter, giving each workspace cell repeated coverage while keeping evaluation coordinates off the exact training points.

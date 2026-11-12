@@ -34,7 +34,6 @@
 - Instantiated `ACTPolicy` and verified `export_config()` returns deployment metadata.
 - `python scripts/preflight_act_policy.py --help` passed.
 - Built a temporary minimal checkpoint and ran `preflight_act_policy.py --skip-cameras --skip-robot --device cpu`; all checks passed.
-
 ## 2026-11-12
 
 - Resolved the user-edit merge conflicts in `act_data/episode_writer.py` and `act_sim/env.py`, keeping both the newer pick-task wording and the stable grasp-carry behavior.

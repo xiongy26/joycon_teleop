@@ -46,3 +46,4 @@ Current Phase: Verification and delivery
 ## Errors Encountered
 
 - Current environment lacks h5py/cv2, so only syntax/help checks can run until ACT dependencies are installed.
+- Demonstrations use a 4x3 stratified cube-position sampler with per-cell jitter by default; `--cube-sampling random` preserves the earlier uniform sampler for comparison.

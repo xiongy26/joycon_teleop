@@ -1,0 +1,40 @@
+{
+  "checkpoint": "/home/xy/mine/joycon_teleop/runs/act_sim_v5/ckpt/policy_best.pt",
+  "device": "cuda",
+  "num_episodes": 2,
+  "success_rate": 0.0,
+  "successes": 0,
+  "success_distance_cm": 3.5000000000000004,
+  "mean_final_distance_cm": 3.7980299578875396,
+  "median_final_distance_cm": 3.7980299578875396,
+  "worst_final_distance_cm": 3.9627899804712903,
+  "horizon": 130,
+  "query_interval": 10,
+  "max_target_delta": 0.08,
+  "episodes": [
+    {
+      "episode": 0,
+      "cube_x": -0.09,
+      "cube_y": -0.4,
+      "final_distance_cm": 3.6332699353037885,
+      "final_cube_lift_cm": -0.2577031703390742,
+      "max_cube_lift_cm": 0.7607480466365821,
+      "min_last20_distance_cm": 3.3959862029004384,
+      "tail_success_ratio": 0.11538461538461539,
+      "success": false,
+      "horizon_steps": 130
+    },
+    {
+      "episode": 1,
+      "cube_x": -0.03,
+      "cube_y": -0.4,
+      "final_distance_cm": 3.9627899804712903,
+      "final_cube_lift_cm": -0.21077554202160453,
+      "max_cube_lift_cm": 0.6262851834297187,
+      "min_last20_distance_cm": 3.7667513206690413,
+      "tail_success_ratio": 0.0,
+      "success": false,
+      "horizon_steps": 130
+    }
+  ]
+}

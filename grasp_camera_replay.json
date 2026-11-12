@@ -1,0 +1,15 @@
+{
+  "checkpoint": "/home/xy/mine/joycon_teleop/runs/act_sim_v5/ckpt/policy_best.pt",
+  "output": "grasp_camera_replay.mp4",
+  "policy_steps": 40,
+  "recovery_steps": 169,
+  "handoff": {
+    "step": 40,
+    "tip_cube_distance_m": 0.03395863790839945,
+    "grasped": true,
+    "cube_lift_height_m": -0.0059399633771927
+  },
+  "final_grasped": false,
+  "final_cube_lift_cm": -0.21077554202160592,
+  "final_tip_cube_distance_cm": 14.98697045001022
+}

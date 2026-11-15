@@ -11,7 +11,7 @@ const XML_URL = "../act_sim/el_a3_pick_scene.xml";
 // browser has no access to the repository filesystem, so every mesh referenced
 // by the scene must be downloaded explicitly into MuJoCo's MEMFS first.
 const MESH_ASSETS = [
-  ...["l1.stl", "l2.stl", "l3.stl", "l4.stl", "l5.stl", "l6.stl", "el05_l6.stl", "jaw.stl", "yam_gripper_rail.stl"]
+  ...["l1.stl", "l2.stl", "l3.stl", "l4.stl", "l5.stl", "l6.stl", "el05_l6.stl", "jaw.stl", "yam_gripper_rail.stl", "d405_wrist_linear_4310.stl"]
     .map((name) => ({ name, url: `../robot/el_a3_description/meshes/${name}` })),
   { name: "tip_left.stl", url: "../yam_arm_mujoco_standalone/yam_arm_standalone/yam/assets/tip_left.stl" },
   { name: "tip_right.stl", url: "../yam_arm_mujoco_standalone/yam_arm_standalone/yam/assets/tip_right.stl" },

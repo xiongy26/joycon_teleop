@@ -98,7 +98,7 @@
                 <body name="yam_gripper_mount" pos="0 0 -0.053" quat="0 1 0 0">
                   <inertial pos="0 0 0.06" mass="0.05" diaginertia="0.0001 0.0001 0.0001"/>
                   <!-- D405 腕部相机和原项目同款安装支架，直接挂在 YAM 夹爪安装板。 -->
-                  <body name="wrist_camera" pos="0 -0.070435 0.077006" quat="0 0 0.216440 -0.976296">
+                  <body name="wrist_camera" pos="0 -0.070435 0.077006" quat="-0.216440 0 0 -0.976296">
                     <inertial pos="0.0015 0.0067 -0.0195" quat="0.104 0.4652 -0.2063 0.8546"
                       mass="0.1087" diaginertia="6.605e-05 4.486e-05 3.812e-05"/>
                     <geom name="wrist_camera_visual" type="mesh" mesh="d405_wrist_linear_4310"

@@ -36,6 +36,7 @@
     <!-- yam 可动双指 + 滑轨安装板（来自 yam_arm_mujoco_standalone 的 gripper.stl，
          已切除电机圆筒段，仅保留 z∈[45,63.5]mm 滑轨板；坐标已烘焙到 mount 系） -->
     <mesh name="yam_gripper_rail" file="yam_gripper_rail.stl"/>
+    <mesh name="d405_wrist_linear_4310" file="d405_wrist_linear_4310.stl"/>
     <mesh name="yam_tip_left" file="../../../yam_arm_mujoco_standalone/yam_arm_standalone/yam/assets/tip_left.stl"/>
     <mesh name="yam_tip_right" file="../../../yam_arm_mujoco_standalone/yam_arm_standalone/yam/assets/tip_right.stl"/>
   </asset>
@@ -96,6 +97,25 @@
                      gripper_tip_site(mount z=+0.141) = L6 z=-0.194，与旧固定 jaw 版分毫不差。 -->
                 <body name="yam_gripper_mount" pos="0 0 -0.053" quat="0 1 0 0">
                   <inertial pos="0 0 0.06" mass="0.05" diaginertia="0.0001 0.0001 0.0001"/>
+                  <!-- D405 腕部相机和原项目同款安装支架，直接挂在 YAM 夹爪安装板。 -->
+                  <body name="wrist_camera" pos="0 0.070435 0.077006" quat="0 0 0.216440 -0.976296">
+                    <inertial pos="0.0015 0.0067 -0.0195" quat="0.104 0.4652 -0.2063 0.8546"
+                      mass="0.1087" diaginertia="6.605e-05 4.486e-05 3.812e-05"/>
+                    <geom name="wrist_camera_visual" type="mesh" mesh="d405_wrist_linear_4310"
+                      rgba="0.20 0.20 0.21 1" contype="0" conaffinity="0" density="0"/>
+                    <geom name="wrist_camera_body_collision" type="box" pos="0.009 0 -0.0115"
+                      size="0.021 0.021 0.0115" contype="1" conaffinity="1"/>
+                    <geom name="wrist_camera_bracket_base" type="box" pos="-0.0003 0.0417 -0.0191"
+                      quat="0.3799 0.5964 0.5964 -0.3799" size="0.003 0.027 0.017"
+                      contype="1" conaffinity="1"/>
+                    <geom name="wrist_camera_bracket_arm" type="box" pos="0.0017 0.0078 -0.0254"
+                      quat="0.5 0.5 0.5 -0.5" size="0.0025 0.0265 0.018"
+                      contype="1" conaffinity="1"/>
+                    <geom name="wrist_camera_bracket_clamp" type="box" pos="0.001 -0.0002 -0.029"
+                      quat="0.5 0.5 0.5 -0.5" size="0.006 0.0281 0.0099"
+                      contype="1" conaffinity="1"/>
+                    <camera name="cam_wrist" pos="0 0 0.0" mode="targetbody" target="cube" fovy="70"/>
+                  </body>
                   <geom name="yam_gripper_rail" type="mesh" mesh="yam_gripper_rail" rgba="0.72 0.72 0.75 1" contype="0" conaffinity="0"/>
                   <body name="finger_left" pos="0.0445119 -0.0239931 0.0566829" quat="0 0.70711 0.70711 0">
                     <inertial mass="0.07" pos="0.014 -0.042 -0.022" diaginertia="5e-05 5e-05 5e-05"/>
@@ -112,10 +132,6 @@
                   <site name="gripper_tip_site" pos="0 0 0.141" size="0.005" rgba="0 1 0 1" type="sphere"/>
                   <!-- 抓取参考点：位于两指之间，跟随末端法兰，不随 L7 开合转动。 -->
                   <site name="grasp_center_site" pos="0.0015 0.002 0.153" size="0.004" rgba="1 0 1 1" type="sphere"/>
-                  <!-- 腕部相机安装座固定在末端法兰，位置和朝向都随机械臂末端一起运动。 -->
-                  <body name="wrist_camera_mount" pos="0 0.015 0.035">
-                    <camera name="cam_wrist" pos="0 0 0.03" xyaxes="0.877800 -0.471165 -0.086434 -0.478712 -0.869364 -0.122639" fovy="70"/>
-                  </body>
                 </body>
 
                 <!-- L7 载体：空 body，仅作为夹爪电机的仿真通道（与实机 7 号电机对应） -->

@@ -28,6 +28,7 @@
     <!-- yam 可动双指 + 滑轨安装板（来自 yam_arm_mujoco_standalone 的 gripper.stl，
          已切除电机圆筒段，仅保留 z∈[45,63.5]mm 滑轨板；坐标已烘焙到 mount 系） -->
     <mesh name="yam_gripper_rail" content_type="model/stl" file="../meshes/yam_gripper_rail.stl"/>
+    <mesh name="d405_wrist_linear_4310" content_type="model/stl" file="../meshes/d405_wrist_linear_4310.stl"/>
     <mesh name="yam_tip_left" content_type="model/stl" file="../../../yam_arm_mujoco_standalone/yam_arm_standalone/yam/assets/tip_left.stl"/>
     <mesh name="yam_tip_right" content_type="model/stl" file="../../../yam_arm_mujoco_standalone/yam_arm_standalone/yam/assets/tip_right.stl"/>
   </asset>
@@ -83,6 +84,25 @@
                      滑轨板背面(mount z=+0.045→L6 z=-0.098)嵌入腕口 8mm，正面凸出法兰 10.5mm。 -->
                 <body name="yam_gripper_mount" pos="0 0 -0.053" quat="0 1 0 0">
                   <inertial pos="0 0 0.06" mass="0.05" diaginertia="0.0001 0.0001 0.0001"/>
+                  <!-- D405 腕部相机和原项目同款安装支架，直接挂在 YAM 夹爪安装板。 -->
+                  <body name="wrist_camera" pos="0 0.070435 0.077006" quat="0 0 0.216440 -0.976296">
+                    <inertial pos="0.0015 0.0067 -0.0195" quat="0.104 0.4652 -0.2063 0.8546"
+                      mass="0.1087" diaginertia="6.605e-05 4.486e-05 3.812e-05"/>
+                    <geom name="wrist_camera_visual" type="mesh" mesh="d405_wrist_linear_4310"
+                      rgba="0.20 0.20 0.21 1" contype="0" conaffinity="0" density="0"/>
+                    <geom name="wrist_camera_body_collision" type="box" pos="0.009 0 -0.0115"
+                      size="0.021 0.021 0.0115" contype="1" conaffinity="1"/>
+                    <geom name="wrist_camera_bracket_base" type="box" pos="-0.0003 0.0417 -0.0191"
+                      quat="0.3799 0.5964 0.5964 -0.3799" size="0.003 0.027 0.017"
+                      contype="1" conaffinity="1"/>
+                    <geom name="wrist_camera_bracket_arm" type="box" pos="0.0017 0.0078 -0.0254"
+                      quat="0.5 0.5 0.5 -0.5" size="0.0025 0.0265 0.018"
+                      contype="1" conaffinity="1"/>
+                    <geom name="wrist_camera_bracket_clamp" type="box" pos="0.001 -0.0002 -0.029"
+                      quat="0.5 0.5 0.5 -0.5" size="0.006 0.0281 0.0099"
+                      contype="1" conaffinity="1"/>
+                    <camera name="cam_wrist" quat="0.13972951 0.82113985 0.31467616 -0.45517460" focal="0.00193 0.00193" resolution="640 480" sensorsize="0.00316178 0.00237440"/>
+                  </body>
                   <geom name="yam_gripper_rail" type="mesh" mesh="yam_gripper_rail" rgba="0.72 0.72 0.75 1" contype="0" conaffinity="0"/>
                   <!-- 开合方向按用户要求（2026-11-11）与上一版相反：只把两指滑动轴
                        的符号对调（0 1 0 <-> 0 -1 0），张开时每根手指即向上一版

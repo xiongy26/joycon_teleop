@@ -70,13 +70,6 @@
                 rgba="0.972549 0.529412 0.00392157 1" mesh="l6"/>
               <body name="l5_l6_urdf_asm" pos="0.00685 0 0.039" quat="0.499998 -0.5 0.500002 -0.5">
                 <inertial pos="7.89154e-06 -9.46048e-05 0.0599853" quat="0.718801 -0.00441624 0.0042182 0.695189" mass="0.678292" diaginertia="0.00387593 0.00345206 0.000635307"/>
-                <body name="wrist_camera" pos="0 0.070435 0.077006" quat="0 0 -0.216440 0.976296">
-                  <inertial pos="0.0015 0.0067 -0.0195" quat="0.104 0.4652 -0.2063 0.8546"
-                    mass="0.1087" diaginertia="6.605e-05 4.486e-05 3.812e-05"/>
-                  <geom name="wrist_camera_visual" type="mesh" mesh="d405_wrist_linear_4310"
-                    rgba="0.20 0.20 0.21 1" contype="0" conaffinity="0" density="0"/>
-                  <camera name="cam_wrist" quat="0.13972951 0.82113985 0.31467616 -0.45517460" focal="0.00193 0.00193" resolution="640 480" sensorsize="0.00316178 0.00237440"/>
-                </body>
                 <joint name="L6_joint" pos="0 0 0" axis="0 0 1" range="-0.79 0.79" actuatorfrcrange="-6 6" damping="0.05" frictionloss="0.05"/>
                 <geom name="el05_l6_visual" pos="0 0 -0.0755" quat="1.32679e-06 1 0 0" type="mesh" contype="0" conaffinity="0"
                   rgba="0.301961 0.290196 0.262745 1" mesh="el05_l6"/>
@@ -91,7 +84,14 @@
                      滑轨板背面(mount z=+0.045→L6 z=-0.098)嵌入腕口 8mm，正面凸出法兰 10.5mm。 -->
                 <body name="yam_gripper_mount" pos="0 0 -0.053" quat="0 1 0 0">
                   <inertial pos="0 0 0.06" mass="0.05" diaginertia="0.0001 0.0001 0.0001"/>
-                  <!-- D405 腕部相机和原项目同款安装支架，直接贴装在末端关节模组。 -->
+                  <!-- D405 腕部相机和原项目同款安装支架，支架底座贴着末端关节模组安装板。 -->
+                  <body name="wrist_camera" pos="0 -0.070435 0.077006" quat="0 0 0.216440 -0.976296">
+                    <inertial pos="0.0015 0.0067 -0.0195" quat="0.104 0.4652 -0.2063 0.8546"
+                      mass="0.1087" diaginertia="6.605e-05 4.486e-05 3.812e-05"/>
+                    <geom name="wrist_camera_visual" type="mesh" mesh="d405_wrist_linear_4310"
+                      rgba="0.20 0.20 0.21 1" contype="0" conaffinity="0" density="0"/>
+                    <camera name="cam_wrist" quat="0.13972951 0.82113985 0.31467616 -0.45517460" focal="0.00193 0.00193" resolution="640 480" sensorsize="0.00316178 0.00237440"/>
+                  </body>
                   <geom name="yam_gripper_rail" type="mesh" mesh="yam_gripper_rail" rgba="0.72 0.72 0.75 1" contype="0" conaffinity="0"/>
                   <!-- 开合方向按用户要求（2026-11-11）与上一版相反：只把两指滑动轴
                        的符号对调（0 1 0 <-> 0 -1 0），张开时每根手指即向上一版
